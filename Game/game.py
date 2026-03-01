@@ -61,11 +61,38 @@ from __future__ import annotations
 
 import argparse
 import random
+import sys
 from typing import Optional
 
 import pygame
 
 import constants as C
+
+
+def _set_windows_dpi_awareness() -> None:
+    """Best-effort DPI awareness so window sizes map to physical pixels on Windows."""
+    if sys.platform != "win32":
+        return
+
+    try:
+        import ctypes
+
+        shcore = getattr(ctypes.windll, "shcore", None)
+        user32 = getattr(ctypes.windll, "user32", None)
+
+        if shcore is not None:
+            try:
+                shcore.SetProcessDpiAwareness(2)
+            except Exception:
+                pass
+
+        if user32 is not None:
+            try:
+                user32.SetProcessDPIAware()
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 # =============================================================================
@@ -125,7 +152,10 @@ class Player:
 
         # Only apply gravity and spin if we are actually falling/jumping
         if not self.on_ground:
-            self.vy += C.GRAVITY * dt
+            if self.vy < C.MAX_FALL_SPEED:
+                self.vy += C.GRAVITY * dt
+                if self.vy > C.MAX_FALL_SPEED:
+                    self.vy = C.MAX_FALL_SPEED
             self.angle = (self.angle - 220 * dt) % 360
         else:
             # Snap angle nicely to the nearest 90 degrees when sliding on a block
@@ -321,6 +351,7 @@ class Game:
 
     def _init_display(self) -> None:
         """Initialise pygame window, clock, and HUD font."""
+        _set_windows_dpi_awareness()
         if not pygame.get_init():
             pygame.init()
         pygame.font.init()
