@@ -13,11 +13,13 @@
 #        python game.py                  # normal play
 #        python game.py --debug          # shows hitboxes in yellow
 #        python game.py --seed 123       # fixed obstacle layout (reproducible)
+#        python game.py --agent --weights logs/checkpoints/policy_final.pth  # AI agent mode
 #
 #   Controls:
-#        SPACE or UP ARROW  →  jump
+#        SPACE or UP ARROW  →  jump (or agent decides in AI mode)
 #        R                  →  restart immediately
 #        H                  →  toggle hitbox debug overlay
+#        T                  →  toggle inference telemetry (AI mode only)
 #        Q or ESC           →  quit
 #
 # ── HOW TO USE PROGRAMMATICALLY (for RL / YOLO) ──────────────────────────────
@@ -63,10 +65,22 @@ import argparse
 import random
 import sys
 from typing import Optional
+from pathlib import Path
 
 import pygame
 
 import constants as C
+from level_generator import LevelGenerator
+
+# Optional: import RL model for AI agent mode
+try:
+    import torch
+    from rl_model import SimplePolicyNetwork
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    SimplePolicyNetwork = None
+    torch = None
 
 
 def _set_windows_dpi_awareness() -> None:
@@ -243,13 +257,25 @@ class Spike:
 
     @property
     def hitbox(self) -> pygame.Rect:
-        """Narrow rectangle representing the dangerous inner zone of the spike."""
-        margin_px = int(self.w * C.SPIKE_HITBOX_MARGIN)
+        """Rectangle kill zone with centered width and independent vertical insets."""
+        width_frac = max(0.01, min(1.0, C.SPIKE_HITBOX_WIDTH_FRAC))
+        top_inset_frac = max(0.0, min(1.0, C.SPIKE_HITBOX_TOP_INSET_FRAC))
+        bottom_inset_frac = max(0.0, min(1.0, C.SPIKE_HITBOX_BOTTOM_INSET_FRAC))
+
+        # Keep hitbox centered horizontally while allowing exact width control.
+        margin_x = int(self.w * (1.0 - width_frac) * 0.5)
+        hitbox_w = max(1, int(self.w * width_frac))
+
+        # Allow independent top/bottom control (not vertically centered by default).
+        inset_top = int(self.h * top_inset_frac)
+        inset_bottom = int(self.h * bottom_inset_frac)
+        hitbox_h = max(1, int(self.h - inset_top - inset_bottom))
+
         return pygame.Rect(
-            int(self.x) + margin_px,
-            int(self._y),
-            int(self.w - 2 * margin_px),
-            int(self.h),
+            int(self.x) + margin_x,
+            int(self._y) + inset_top,
+            hitbox_w,
+            hitbox_h,
         )
 
     def draw(self, surface: pygame.Surface, debug: bool = False) -> None:
@@ -326,11 +352,23 @@ class Game:
         Show hitbox outlines (yellow rectangles).
     """
 
-    def __init__(self, render: bool = True, seed: Optional[int] = None, debug: bool = False) -> None:
+    def __init__(self, render: bool = True, seed: Optional[int] = None, debug: bool = False, agent_policy: Optional = None) -> None:
         self._do_render = render
         self._seed      = seed
         self._debug     = debug
         self._rng       = random.Random(seed)
+        self._telemetry_enabled: bool = False
+        self._telemetry_obs: dict = {}
+        self._telemetry_reward: float = 0.0
+        self._telemetry_done: bool = False
+        self._last_action: int = 0
+        
+        # AI Agent state
+        self._agent_policy = agent_policy
+        self._agent_enabled = agent_policy is not None
+        self._agent_action_probs: list = [0.0, 0.0]  # [no-jump, jump] probabilities
+        self._agent_predicted_action: int = 0
+        self._agent_confidence: float = 0.0
 
         self.player    = Player()
         self.obstacles : list[Spike | Block] = []
@@ -375,6 +413,7 @@ class Game:
         self._scroll_x = 0.0
         self._step_n   = 0
         self._next_x   = float(C.SPAWN_X)
+        self._last_action = 0
 
         if self._fixed_level and self._level_dicts:
             self.obstacles = []
@@ -427,6 +466,11 @@ class Game:
         done   : bool    True if the player has died.
         """
         self._step_n += 1
+        self._last_action = action
+        
+        # Update agent inference info if in AI mode
+        if self._agent_policy is not None:
+            self._update_agent_inference()
 
         if action == 1:
             self.player.jump()
@@ -447,8 +491,11 @@ class Game:
 
         reward = C.REWARD_DEATH if dead else C.REWARD_ALIVE
         done   = dead
-
-        return self._obs(), reward, done
+        obs = self._obs()
+        self._telemetry_obs = obs
+        self._telemetry_reward = reward
+        self._telemetry_done = done
+        return obs, reward, done
 
     def render(self) -> None:
         """Draw the current frame to the pygame window."""
@@ -458,6 +505,8 @@ class Game:
         for obs in self.obstacles: obs.draw(self.surface, debug=self._debug)
         self.player.draw(self.surface, debug=self._debug)
         self._draw_hud()
+        if self._telemetry_enabled:
+            self._draw_telemetry_panel()
         pygame.display.flip()
 
     def tick(self) -> float:
@@ -473,6 +522,38 @@ class Game:
     def toggle_debug(self) -> None:
         """Flip the hitbox debug overlay on/off."""
         self._debug = not self._debug
+
+    def toggle_telemetry(self) -> None:
+        """Flip in-game telemetry overlay on/off."""
+        self._telemetry_enabled = not self._telemetry_enabled
+    
+    def _update_agent_inference(self) -> None:
+        """Update agent prediction info for live inference display."""
+        if self._agent_policy is None or not TORCH_AVAILABLE:
+            return
+        
+        try:
+            obs_norm = self.get_normalized_observation()
+            obs_tensor = torch.tensor(obs_norm, dtype=torch.float32, device=self._agent_policy.device)
+            obs_tensor = obs_tensor.unsqueeze(0)  # Add batch dimension
+            
+            with torch.no_grad():
+                logits = self._agent_policy.forward(obs_tensor)
+                probs = torch.softmax(logits, dim=1)[0]  # Get first (only) batch element
+                self._agent_action_probs = [probs[0].item(), probs[1].item()]
+                self._agent_predicted_action = torch.argmax(probs).item()
+                self._agent_confidence = probs[self._agent_predicted_action].item()
+        except Exception:
+            # Silently ignore errors in inference (e.g., if model not loaded properly)
+            pass
+    
+    def get_agent_action(self) -> int:
+        """Get action prediction from AI agent policy."""
+        if self._agent_policy is None:
+            return 0
+        
+        obs_norm = self.get_normalized_observation()
+        return self._agent_policy.predict(obs_norm)
 
     # ── Observation dict ──────────────────────────────────────────────────────
 
@@ -500,8 +581,67 @@ class Game:
             "player_y":  float(self.player.y),
             "player_vy": float(self.player.vy),
             "on_ground": 1.0 if self.player.on_ground else 0.0,
-            "obstacles": obs_array 
+            "obstacles": obs_array,
+            "last_action": float(self._last_action),
         }
+
+    def get_normalized_observation(self) -> list[float]:
+        """
+        Return observation as a normalized list of floats suitable for NN input.
+        Includes: [player_y, player_vy, on_ground, obstacle features..., is_jump_possible, last_action]
+        Total: 3 + (5 obstacles × 8 features) + 1 + 1 = 45 values.
+        All normalized to roughly [0, 1] or [-1, 1].
+        """
+        obs = self._obs()
+        normalized = []
+
+        # Player state (normalized)
+        # player_y: [0, GROUND_Y] → [0, 1]
+        normalized.append(obs["player_y"] / C.GROUND_Y)
+        
+        # player_vy: [-2000, 2000] → [-1, 1]
+        normalized.append(max(-1.0, min(1.0, obs["player_vy"] / C.MAX_FALL_SPEED)))
+        
+        # on_ground: already 0 or 1
+        normalized.append(obs["on_ground"])
+
+        # Obstacle features (5 obstacles, 8 features each)
+        MAX_OBSTACLES = 5
+        upcoming = sorted([o for o in self.obstacles if o.x + o.w >= C.PLAYER_X], key=lambda o: o.x)
+        
+        for i in range(MAX_OBSTACLES):
+            if i < len(upcoming):
+                o = upcoming[i]
+                otype = 0.0 if o.kind == "spike" else 1.0
+                rel_x = o.x - C.PLAYER_X
+                rel_y = o._y - self.player.y
+                time_to_reach = rel_x / C.GAME_SPEED if C.GAME_SPEED > 0 else 0.0
+                
+                # Gap calculations (simplified)
+                gap_top = max(0.0, o._y - (self.player.y + C.PLAYER_SIZE))
+                gap_bot = max(0.0, (self.player.y - C.PLAYER_SIZE) - (o._y + o.h)) if o.kind == "block" else 0.0
+                
+                normalized.extend([
+                    otype,                                        # type: 0 or 1
+                    max(0.0, min(1.0, rel_x / C.SCREEN_W)),      # rel_x normalized
+                    max(-1.0, min(1.0, rel_y / C.GROUND_Y)),     # rel_y normalized
+                    o.w / C.BLOCK_SIZE / 5.0,                    # width normalized (assume max ~5 blocks)
+                    o.h / C.BLOCK_SIZE / 5.0,                    # height normalized
+                    max(0.0, min(1.0, time_to_reach / 6.0)),    # time_to_reach normalized (0-6 seconds)
+                    max(0.0, min(1.0, gap_top / C.GROUND_Y)),    # gap_top normalized
+                    max(0.0, min(1.0, gap_bot / C.GROUND_Y)),    # gap_bot normalized
+                ])
+            else:
+                # Pad with zeros
+                normalized.extend([0.0] * 8)
+
+        # is_jump_possible_now (same as on_ground)
+        normalized.append(obs["on_ground"])
+        
+        # last_action: 0 or 1
+        normalized.append(obs["last_action"])
+
+        return normalized
 
     # ── Spawning ──────────────────────────────────────────────────────────────
 
@@ -613,10 +753,68 @@ class Game:
             f"dist : {int(self._scroll_x):>7} px",
             f"steps: {self._step_n:>7}",
             f"debug: {'ON ' if self._debug else 'OFF'}  (H to toggle)",
+            f"telem: {'ON ' if self._telemetry_enabled else 'OFF'}  (T to toggle)",
         ]
+        
+        # Add AI agent indicator if in agent mode
+        if self._agent_enabled:
+            lines.append(f"agent: AI MODE  (watching trained agent)")
+        
         for i, line in enumerate(lines):
             surf = self.font.render(line, True, C.HUD_COLOR)
             self.surface.blit(surf, (10, 10 + i * 20))
+
+    def _draw_telemetry_panel(self) -> None:
+        """Right-side in-game telemetry panel."""
+        if self.surface is None or self.font is None:
+            return
+
+        # Adjust panel height based on whether agent mode is active
+        panel_w = 700
+        panel_h = 240 if self._agent_enabled else 160
+        panel_x = C.SCREEN_W - panel_w - 12
+        panel_y = 12
+        panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+        panel.fill((15, 15, 30, 200))
+        pygame.draw.rect(panel, (90, 90, 120, 240), panel.get_rect(), 2)
+        self.surface.blit(panel, (panel_x, panel_y))
+
+        obs = self._telemetry_obs if self._telemetry_obs else self._obs()
+        obstacles = obs.get("obstacles", [])
+        if len(obstacles) >= 5 and (obstacles[1] != 0.0 or obstacles[3] != 0.0):
+            otype = "spike" if obstacles[0] == 0.0 else "block"
+            next_obs = f"{otype} x={obstacles[1]:.1f} y={obstacles[2]:.1f} w={obstacles[3]:.1f} h={obstacles[4]:.1f}"
+        else:
+            next_obs = "none"
+
+        lines = [
+            f"telemetry  |  reward={self._telemetry_reward:.3f}  done={self._telemetry_done}",
+            f"player_y={obs.get('player_y', 0.0):.1f}  vy={obs.get('player_vy', 0.0):.1f}  on_ground={obs.get('on_ground', 0.0):.0f}",
+            f"distance={int(self._scroll_x)} px  steps={self._step_n}",
+            f"next: {next_obs}",
+            (
+                "spike_hitbox: "
+                f"w={C.SPIKE_HITBOX_WIDTH_FRAC:.3f}, "
+                f"top={C.SPIKE_HITBOX_TOP_INSET_FRAC:.3f}, "
+                f"bot={C.SPIKE_HITBOX_BOTTOM_INSET_FRAC:.3f}"
+            ),
+        ]
+        
+        # Add AI agent inference info if enabled
+        if self._agent_enabled:
+            lines.append("-" * 80)
+            lines.append(
+                f"AI AGENT INFERENCE  |  "
+                f"action={'JUMP' if self._agent_predicted_action == 1 else 'WAIT':>4}  "
+                f"confidence={self._agent_confidence:.1%}"
+            )
+            lines.append(
+                f"probs: no-jump={self._agent_action_probs[0]:.3f}  jump={self._agent_action_probs[1]:.3f}"
+            )
+
+        for i, line in enumerate(lines):
+            surf = self.font.render(line, True, C.HUD_COLOR)
+            self.surface.blit(surf, (panel_x + 10, panel_y + 10 + i * 28))
 
 
 # =============================================================================
@@ -630,43 +828,163 @@ def main() -> None:
     CLI flags:
         --debug         start with hitbox overlay enabled
         --seed INT      fixed random seed (same seed = same level every run)
+        --agent         watch trained AI agent play
+        --weights PATH  path to trained model weights (use with --agent)
     """
-    parser = argparse.ArgumentParser(description="Geometry Dash RL — human play")
+    parser = argparse.ArgumentParser(description="Geometry Dash RL — human play or AI agent mode")
     parser.add_argument("--debug", action="store_true", help="Show hitbox outlines (yellow rectangles)")
-    parser.add_argument("--seed", type=int, default=None, help="Fixed RNG seed for reproducible level layout")
+    parser.add_argument(
+        "--seed", 
+        type=int, 
+        default=None, 
+        help="Fixed RNG seed for reproducible level layout (default: 42 in agent mode, random in human mode)"
+    )
+    parser.add_argument(
+        "--difficulty",
+        type=int,
+        default=None,
+        help="Level difficulty 1-5 (1=easy, 5=extreme). Agent mode defaults to 1. "
+             "If not specified, uses random procedural obstacles instead of LevelGenerator."
+    )
+    parser.add_argument(
+        "--length",
+        type=int,
+        default=6000,
+        help="Level length in pixels when using --difficulty (default: 6000px ≈ 20 seconds)"
+    )
+    parser.add_argument("--telemetry", action="store_true", help="Start with in-game telemetry panel enabled")
+    
+    # ── AI Agent Mode ─────────────────────────────────────────────────────────
+    # These flags control INFERENCE (watching trained agent), NOT training.
+    # Training is done with train.py, this just loads weights and watches.
+    parser.add_argument(
+        "--agent", 
+        action="store_true", 
+        help="INFERENCE MODE: Watch trained AI agent play (loads model weights, no training)"
+    )
+    parser.add_argument(
+        "--weights",
+        type=str,
+        default="logs/checkpoints/policy_final.pth",
+        help="Path to trained model checkpoint (.pth file). Use with --agent flag. "
+             "Example: --weights logs/checkpoints/policy_ep500.pth"
+    )
+    parser.add_argument(
+        "--device", 
+        type=str, 
+        default="cpu", 
+        choices=["cpu", "cuda"], 
+        help="Device for inference (cpu or cuda). Only matters with --agent flag."
+    )
     args = parser.parse_args()
+    
+    # Load AI agent if requested
+    agent_policy = None
+    if args.agent:
+        if not TORCH_AVAILABLE:
+            print("ERROR: PyTorch not available. Cannot use --agent mode.")
+            print("Install with: pip install torch")
+            sys.exit(1)
+        
+        weights_path = Path(args.weights)
+        if not weights_path.exists():
+            print(f"ERROR: Weights file not found: {weights_path}")
+            print("Train a model first with: python train.py")
+            sys.exit(1)
+        
+        print(f"Loading trained agent from {weights_path}...")
+        agent_policy = SimplePolicyNetwork(device=args.device)
+        agent_policy.load(str(weights_path))
+        agent_policy.eval()  # Set to evaluation mode
+        print(f"✓ Agent loaded successfully ({agent_policy.parameter_count:,} parameters)")
+        print("  Watching AI agent play. Press T to see live inference.\n")
+    
+    # In agent mode, set sensible defaults for comparison:
+    # - Fixed seed (same level every time)
+    # - Difficulty 1 (easiest level)
+    if args.agent:
+        if args.seed is None:
+            args.seed = 42  # Fixed seed so you watch agent on SAME level repeatedly
+        if args.difficulty is None:
+            args.difficulty = 1  # Start with easiest level
+        print(f"Agent mode: Using difficulty {args.difficulty}, seed={args.seed}")
+        print(f"  (Same obstacles every attempt so you can see if agent improves)\n")
+    
+    # Generate level using LevelGenerator if difficulty specified
+    level_obstacles = None
+    if args.difficulty is not None:
+        print(f"Generating level: difficulty={args.difficulty}, seed={args.seed}, length={args.length}px")
+        level_gen = LevelGenerator(
+            difficulty=args.difficulty,
+            seed=args.seed,
+            progressive=False
+        )
+        level_obstacles = level_gen.generate(length=args.length)
+        print(f"  Generated {len(level_obstacles)} obstacles\n")
 
-    game     = Game(render=True, seed=args.seed, debug=args.debug)
+    game = Game(render=True, seed=args.seed, debug=args.debug, agent_policy=agent_policy)
+    
+    # Load the generated level if we made one
+    if level_obstacles is not None:
+        game.load_level(level_obstacles)
+    if args.telemetry or args.agent:
+        game.toggle_telemetry()  # Auto-enable telemetry in agent mode
     attempts = 0
     best_px  = 0
 
-    print("=" * 50)
-    print("  GEOMETRY DASH RL — Human Play Mode")
-    print("=" * 50)
-    print("  SPACE / UP  →  jump")
-    print("  R           →  restart")
+    print("=" * 70)
+    if args.agent:
+        print("  GEOMETRY DASH RL — AI Agent Mode")
+    else:
+        print("  GEOMETRY DASH RL — Human Play Mode")
+    print("=" * 70)
+    if level_obstacles:
+        print(f"  Level: Difficulty {args.difficulty} | {len(level_obstacles)} obstacles | seed={args.seed}")
+    else:
+        print(f"  Level: Random procedural obstacles | seed={args.seed if args.seed else 'random'}")
+    print("=" * 70)
+    if args.agent:
+        print("  AI is playing automatically")
+        print("  T           →  toggle inference telemetry")
+    else:
+        print("  SPACE / UP  →  jump")
+    print("  R           →  restart (same level)")
     print("  H           →  toggle hitbox debug overlay")
+    print("  T           →  toggle telemetry panel")
     print("  Q / ESC     →  quit")
-    print("=" * 50)
+    print("=" * 70)
 
     running = True
     while running:
         dt     = game.tick()
-        action = 0
+        
+        # In agent mode, AI chooses actions. In human mode, player controls.
+        if args.agent:
+            action = game.get_agent_action()
+        else:
+            action = 0
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT: running = False
             elif event.type == pygame.KEYDOWN:
-                if event.key in (pygame.K_SPACE, pygame.K_UP): action = 1
-                elif event.key == pygame.K_r:
-                    game.reset()
+                # Only allow manual jumps in human mode
+                if not args.agent and event.key in (pygame.K_SPACE, pygame.K_UP): 
+                    action = 1
+                if event.key == pygame.K_r:
+                    # Reload the same level (if using LevelGenerator)
+                    if level_obstacles is not None:
+                        game.load_level(level_obstacles)
+                    else:
+                        game.reset()
                     attempts += 1
                 elif event.key == pygame.K_h: game.toggle_debug()
+                elif event.key == pygame.K_t: game.toggle_telemetry()
                 elif event.key in (pygame.K_q, pygame.K_ESCAPE): running = False
 
-        # Check held keys so holding space feels responsive
-        keys = pygame.key.get_pressed()
-        if keys[pygame.K_SPACE] or keys[pygame.K_UP]: action = 1
+        # Check held keys for responsive jumping (human mode only)
+        if not args.agent:
+            keys = pygame.key.get_pressed()
+            if keys[pygame.K_SPACE] or keys[pygame.K_UP]: action = 1
 
         obs, reward, done = game.step(action, dt)
         game.render()
@@ -676,8 +994,12 @@ def main() -> None:
         if done:
             attempts += 1
             print(f"  Attempt {attempts:>3}  |  dist = {int(game._scroll_x):>6} px  |  best = {best_px:>6} px")
-            pygame.time.wait(300)   
-            game.reset()
+            pygame.time.wait(300)
+            # Reload the same level (if using LevelGenerator)
+            if level_obstacles is not None:
+                game.load_level(level_obstacles)
+            else:
+                game.reset()
 
     game.close()
     print(f"\nSession over. {attempts} attempts. Best distance: {best_px} px.")

@@ -109,13 +109,19 @@ SPIKE_H      = BLOCK_SIZE   # px — height of a spike      (= 30)
 BLOCK_W      = BLOCK_SIZE   # px — width  of a solid block (= 30)
 BLOCK_H      = BLOCK_SIZE   # px — height of a solid block (= 30)
 
-# Spike hitbox is NARROWER than the visible triangle.
-# In real GD the dangerous zone is roughly the inner 40% of spike width —
-# the outer edges of the triangle silhouette won't actually kill you.
-# We trim 30% off each side → kill zone = middle 40% of the triangle.
-# This matches "I can barely squeeze past" GD spike feel.
-SPIKE_HITBOX_MARGIN = 0.30  # fraction of SPIKE_W trimmed from each side
-                             # 0.30 left + 0.30 right = 0.40 kill zone width
+# Spike hitbox tuning.
+# Horizontal: hitbox stays centered on the spike and uses this fraction of width.
+# Vertical: top and bottom insets are controlled independently so the kill zone
+# can be moved up/down and resized without changing spike art.
+#
+# Effective rectangle:
+#   x = spike_x + (SPIKE_W * (1 - SPIKE_HITBOX_WIDTH_FRAC) / 2)
+#   w = SPIKE_W * SPIKE_HITBOX_WIDTH_FRAC
+#   y = spike_y + (SPIKE_H * SPIKE_HITBOX_TOP_INSET_FRAC)
+#   h = SPIKE_H * (1 - top_inset - bottom_inset)
+SPIKE_HITBOX_WIDTH_FRAC = 20 / 95
+SPIKE_HITBOX_TOP_INSET_FRAC = 84/284
+SPIKE_HITBOX_BOTTOM_INSET_FRAC = 84/284
 
 # Solid blocks use the full rectangle — touching any face is fatal.
 BLOCK_HITBOX_MARGIN = 0     # px (0 = no forgiveness, full rectangle kills)

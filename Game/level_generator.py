@@ -1,47 +1,224 @@
-# =============================================================================
-# level_generator.py
-# =============================================================================
-# Procedural level generator based on real Geometry Dash patterns.
-#
-# KEY PHYSICS CONSTRAINT (why blocks need 3-block minimum width):
-#   - Player cube = 1 block (30px) wide
-#   - At normal speed (300px/s), cube travels 90px in 0.3s
-#   - Jump airtime (up+down) ≈ 0.67s → horizontal travel ≈ 200px per jump
-#   - Minimum landing zone to not clip the next obstacle = 3 blocks (90px)
-#   - This is why Stereo Madness staircase steps are 3+ blocks wide
-#
-# PATTERNS FROM RESEARCH:
-#   Stereo Madness  : single spikes, block platforms, ascending stairs
-#   Back On Track   : double spikes, block runs
-#   Polargeist/Dry Out : triple spikes introduced, spike+block combos
-#   Time Machine    : "9 triple spikes", very dense
-#   Cycles          : alternating spikes, tight patterns
-#
-# HOW TO USE:
-# ─────────────────────────────────────────────────────────────────────────────
-#   # Generate and preview in a window:
-#   python level_generator.py --diff 2 --seed 42
-#   python level_generator.py --diff 3 --progressive --debug
-#
-#   # Use from Python (for RL training):
-#   from level_generator import LevelGenerator
-#   from game import Game
-#
-#   gen = LevelGenerator(difficulty=2, seed=42)
-#   g   = Game(render=False)
-#   obs = g.load_level(gen.generate(length=6000))
-#
-#   obs, reward, done = g.step(action)
-#   if done:
-#       obs = g.reset()       # reloads the same level
-#
-# DIFFICULTY GUIDE:
-#   1 = Stereo Madness / Back On Track  (easy, lots of breathing room)
-#   2 = Polargeist / Dry Out            (medium, double spikes, blocks)
-#   3 = Base After Base / Can't Let Go  (hard, triple spikes, combos)
-#   4 = Jumper / Time Machine           (very hard, dense, fast)
-#   5 = Cycles and beyond               (extreme, maximum density)
-# =============================================================================
+"""
+=============================================================================
+level_generator.py
+=============================================================================
+Procedural Geometry Dash level generator. Produces realistic obstacle layouts
+based on patterns found in real GD official levels (Stereo Madness through
+Cycles). Used to train and evaluate the RL agent with varied environments.
+
+─────────────────────────────────────────────────────────────────────────────
+PROJECT OVERVIEW (where this file fits)
+─────────────────────────────────────────────────────────────────────────────
+This is one of 3 core files in the project:
+
+  constants.py        — all tunable numbers (physics, sizes, rewards, colours)
+  game.py             — the Geometry Dash simulation engine (physics, rendering,
+                        collision, step/reset API for RL)
+  level_generator.py  — THIS FILE — procedurally generates levels for the
+                        agent to train and be evaluated on
+
+Future files (not yet built):
+  gym_wrapper.py      — wraps game.py in the Gymnasium interface for SB3/PPO
+  train.py            — PPO training loop using stable-baselines3
+  yolo_detector.py    — YOLO v8 obstacle detector (replaces perfect game state)
+
+─────────────────────────────────────────────────────────────────────────────
+WHAT THIS FILE DOES
+─────────────────────────────────────────────────────────────────────────────
+Generates a flat list of obstacle dicts that game.py can load via
+Game.load_level(). Each dict describes one obstacle:
+
+    { "type": "spike"|"block", "x": float, "y": float,
+      "w": float, "h": float }
+
+Levels are built by picking "chunks" — small pre-designed obstacle patterns
+(like real GD levels which reuse a set of patterns throughout). Chunks are
+separated by random gaps. Difficulty controls which chunk patterns are chosen
+and how tight the gaps between them are.
+
+─────────────────────────────────────────────────────────────────────────────
+KEY PHYSICS CONSTRAINT (why blocks need 3-block minimum width)
+─────────────────────────────────────────────────────────────────────────────
+  Player cube size    = 1 block = 30px wide
+  Normal speed        = 300px/s
+  Jump airtime        ≈ 0.67s  (up + down)
+  Horizontal per jump ≈ 200px  (300 × 0.67)
+  Minimum landing zone = 3 blocks (90px)
+    → Player needs 90px to touch down AND get airborne again
+      before the next obstacle's hitbox hits them.
+    → This is why staircase steps are 3 blocks wide.
+    → This is why alternating spike gaps are 3 blocks minimum.
+    → 1-block or 2-block landing zones are physically impossible to survive.
+
+─────────────────────────────────────────────────────────────────────────────
+AVAILABLE CHUNK PATTERNS
+─────────────────────────────────────────────────────────────────────────────
+  SIMPLE SPIKES
+    chunk_single_spike          1 spike (30px wide)
+                                Basic jump — bread and butter of early levels
+    chunk_double_spike          2 spikes side by side (60px)
+                                Needs earlier jump timing than single
+    chunk_triple_spike          3 spikes side by side (90px)
+                                Iconic hard obstacle — Stereo Madness 90%,
+                                "9 triple spikes" in Time Machine
+
+  BLOCK OBSTACLES
+    chunk_single_block_wall     3-wide × 1-tall block wall
+                                Player jumps over or lands on top
+    chunk_double_block_wall     2-wide × 2-tall block wall
+                                Must jump OVER — landing on top too risky
+    chunk_block_platform        5-wide × 1-tall flat platform
+                                Player runs along the top or vaults over
+    chunk_spike_on_block        Spike sitting on top of a 3-wide block
+                                Forces higher arc than a ground spike
+    chunk_platform_with_spike_ends  [spike][block×3][spike]
+                                Must land precisely in the middle section
+
+  STAIRCASE PATTERNS
+    chunk_staircase_up          3-step ascending staircase (3 blocks per step)
+                                Stereo Madness ~25% death spot
+                                Each step is 3 blocks wide — minimum safe width
+    chunk_staircase_down        3-step descending staircase (3 blocks per step)
+                                Mid-difficulty levels, hop down step by step
+
+  RHYTHM / COMBO PATTERNS
+    chunk_alternating_spikes    3 spikes with 3-block gaps between each
+                                Forces rhythmic timed hops
+                                (1-block gaps would be physically impossible)
+    chunk_spike_then_platform   Spike → 3-block gap → 3-wide platform
+                                Tests: jump spike, land on platform, jump off
+    chunk_spike_cluster         [spike][spike] gap [spike][spike]
+                                Jump into the middle gap — hard timing
+
+─────────────────────────────────────────────────────────────────────────────
+DIFFICULTY LEVELS
+─────────────────────────────────────────────────────────────────────────────
+  1 — Stereo Madness / Back On Track
+        Patterns : mostly single spikes, block walls, occasional stairs
+        Gaps     : 360–540px between chunks (1.2–1.8s breathing room)
+        Real GD  : 1-star Easy difficulty
+
+  2 — Polargeist / Dry Out
+        Patterns : double spikes, spike-on-block, alternating spikes
+        Gaps     : 270–420px (0.9–1.4s)
+        Real GD  : 2–3 star Normal difficulty
+
+  3 — Base After Base / Can't Let Go
+        Patterns : triple spikes, platform+spike combos, spike_then_platform
+        Gaps     : 180–300px (0.6–1.0s)
+        Real GD  : 4–5 star Hard difficulty
+
+  4 — Jumper / Time Machine
+        Patterns : triple spikes dominant, spike clusters, staircase down
+        Gaps     : 150–240px (0.5–0.8s) — getting tight
+        Real GD  : 6–7 star Harder difficulty
+
+  5 — Cycles and beyond
+        Patterns : maximum variety, tightest gaps, spike clusters everywhere
+        Gaps     : 120–180px (0.4–0.6s) — very tight
+        Real GD  : 8+ star Insane/Demon difficulty
+
+─────────────────────────────────────────────────────────────────────────────
+PROGRESSIVE MODE (for RL curriculum training)
+─────────────────────────────────────────────────────────────────────────────
+  LevelGenerator(difficulty=4, progressive=True)
+
+  Ramps from difficulty 1 → 4 over the first 70% of the level.
+  The last 30% stays at difficulty 4.
+
+  Why this matters for RL:
+  If you train on difficulty 4 from the start, the agent never sees easy
+  obstacles first and has a very hard time learning anything useful.
+  Progressive difficulty is like curriculum learning — start simple,
+  add complexity gradually. This is a well-known trick for hard RL problems.
+
+─────────────────────────────────────────────────────────────────────────────
+HOW TO RUN (command line preview)
+─────────────────────────────────────────────────────────────────────────────
+  Make sure venv is active first:
+    source venv/bin/activate        (Mac/Linux)
+    venv\\Scripts\\activate           (Windows)
+
+  Then:
+    python level_generator.py                          # difficulty 1, default
+    python level_generator.py --diff 2                 # medium difficulty
+    python level_generator.py --diff 3 --seed 99       # fixed layout
+    python level_generator.py --diff 4 --progressive   # ramping difficulty
+    python level_generator.py --diff 2 --debug         # show hitboxes (yellow)
+    python level_generator.py --diff 5 --length 18000  # full 60s level
+
+  Controls in the preview window:
+    SPACE / UP  →  jump
+    R           →  restart (same level)
+    H           →  toggle hitbox debug overlay
+    Q / ESC     →  quit
+
+─────────────────────────────────────────────────────────────────────────────
+HOW TO USE FROM PYTHON (for RL training)
+─────────────────────────────────────────────────────────────────────────────
+  from level_generator import LevelGenerator
+  from game import Game
+
+  # ── Basic usage ────────────────────────────────────────────────────────────
+  gen = LevelGenerator(difficulty=2, seed=42)
+  g   = Game(render=False)                    # headless = fast training
+  obs = g.load_level(gen.generate(length=6000))
+
+  while True:
+      action = agent.predict(obs)             # 0 = do nothing, 1 = jump
+      obs, reward, done = g.step(action)
+      if done:
+          obs = g.reset()                     # reloads the SAME level
+
+  # ── Different level each episode (for generalisation) ──────────────────────
+  for episode in range(1000):
+      gen = LevelGenerator(difficulty=2, seed=episode)
+      obs = g.load_level(gen.generate())
+      ...
+
+  # ── Progressive curriculum ─────────────────────────────────────────────────
+  gen = LevelGenerator(difficulty=4, seed=42, progressive=True)
+  obs = g.load_level(gen.generate(length=12000))
+
+─────────────────────────────────────────────────────────────────────────────
+OBSTACLE DICT FORMAT (what generate() returns)
+─────────────────────────────────────────────────────────────────────────────
+  Each obstacle is a plain Python dict:
+
+    {
+      "type" : "spike" | "block"   obstacle type
+      "x"    : float               left edge x position in screen pixels
+      "y"    : float               top  edge y position in screen pixels
+      "w"    : float               width  in pixels (always 30 = 1 block)
+      "h"    : float               height in pixels (30 per block level)
+    }
+
+  This format is intentionally identical to what YOLO will output later.
+  When we swap in YOLO detections instead of perfect game state, the rest
+  of the pipeline doesn't need to change at all — same dict format.
+
+─────────────────────────────────────────────────────────────────────────────
+ADDING NEW CHUNK PATTERNS
+─────────────────────────────────────────────────────────────────────────────
+  1. Write a function with signature:
+       def chunk_my_pattern(x: float) -> tuple[list[dict], float]:
+           ...
+           return obstacle_list, total_width_consumed
+
+  2. Add it to the relevant POOL_N lists with a weight.
+
+  3. Test it:
+       python level_generator.py --diff N --debug
+       (yellow boxes show hitboxes — verify nothing is impossibly tight)
+
+  Rules for new chunks:
+    - Landing zones must be >= 3 blocks (90px) wide
+    - Never place spikes < 3 blocks apart (player can't fit between them)
+    - Stacked blocks > 3 high are unjumpable — don't use them
+    - Always return the correct width so the gap between chunks is right
+=============================================================================
+"""
+
 
 from __future__ import annotations
 
@@ -442,6 +619,8 @@ def main() -> None:
     parser.add_argument("--length",     type=int,  default=9000)
     parser.add_argument("--progressive", action="store_true")
     parser.add_argument("--debug",      action="store_true")
+    parser.add_argument("--telemetry",  action="store_true",
+                        help="Start with in-game telemetry panel enabled")
     args = parser.parse_args()
 
     gen       = LevelGenerator(difficulty=args.diff, seed=args.seed,
@@ -456,9 +635,11 @@ def main() -> None:
           f"progressive={args.progressive} | length={args.length}px "
           f"({args.length / C.GAME_SPEED:.0f}s)")
     print(f"Generated {len(obstacles)} objects: {types}")
-    print("SPACE/UP=jump  R=restart  H=hitboxes  Q=quit\n")
+    print("SPACE/UP=jump  R=restart  H=hitboxes  T=telemetry  Q=quit\n")
 
     game = Game(render=True, debug=args.debug)
+    if args.telemetry:
+        game.toggle_telemetry()
     game.load_level(obstacles)
 
     attempts = 0
@@ -480,6 +661,8 @@ def main() -> None:
                     attempts += 1
                 elif event.key == pygame.K_h:
                     game.toggle_debug()
+                elif event.key == pygame.K_t:
+                    game.toggle_telemetry()
                 elif event.key in (pygame.K_q, pygame.K_ESCAPE):
                     running = False
 
@@ -488,7 +671,7 @@ def main() -> None:
         if keys[pygame.K_SPACE] or keys[pygame.K_UP]:
             action = 1
 
-        obs, _, done = game.step(action, dt)
+        obs, reward, done = game.step(action, dt)
         game.render()
         best = max(best, int(game._scroll_x))
 
