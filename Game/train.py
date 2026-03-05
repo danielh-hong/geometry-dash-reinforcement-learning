@@ -28,6 +28,7 @@
 import argparse
 import csv
 import os
+import sys
 from pathlib import Path
 from datetime import datetime
 import torch
@@ -199,7 +200,7 @@ class PolicyGradientTrainer:
     unbiased but high-variance. Good for starting; upgrade to PPO/A3C later.
     """
     
-    def __init__(self, config: TrainingConfig):
+    def __init__(self, config: TrainingConfig, resume_from: str = None):
         self.config = config
         
         # Policy network
@@ -213,6 +214,13 @@ class PolicyGradientTrainer:
         
         # Track episode rewards for running average
         self.episode_rewards = []
+        
+        # Resume from checkpoint if specified
+        if resume_from is not None:
+            print(f"\nResuming training from checkpoint: {resume_from}")
+            self.policy.load(resume_from)
+            print(f"  ✓ Loaded policy weights ({self.policy.parameter_count:,} parameters)")
+            print("  Note: Optimizer state is reset (learning starts fresh from loaded weights)\n")
     
     def collect_trajectory(self, game: Game) -> Tuple[List, List, List]:
         """
@@ -242,7 +250,7 @@ class PolicyGradientTrainer:
         obs = game.reset()
         done = False
         step = 0
-        max_steps = 1000  # Cap steps to prevent infinite loops
+        max_steps = 2500  # Increased step cap to allow full 20-second level completion
         
         while not done and step < max_steps:
             # Get normalized observation
@@ -253,11 +261,18 @@ class PolicyGradientTrainer:
             action = self.policy.predict(obs_norm)
             actions.append(action)
             
-            # Apply action in environment
-            obs, reward, done = game.step(action)
-            rewards.append(reward)
+            # Action Repeat: Apply the same action for 4 consecutive frames
+            accumulated_reward = 0.0
+            for _ in range(4):
+                obs, step_reward, done = game.step(action)
+                accumulated_reward += step_reward
+                if done:
+                    break
             
-            step += 1
+            rewards.append(accumulated_reward)
+            
+            # We stepped up to 4 times
+            step += 4
         
         return observations, actions, rewards
     
@@ -513,8 +528,22 @@ def main() -> None:
         default="logs",
         help="Directory for logs and checkpoints (default: logs)"
     )
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Resume training from checkpoint .pth file. "
+             "Example: --resume logs/checkpoints/policy_ep00500.pth"
+    )
     
     args = parser.parse_args()
+    
+    # Validate resume path if provided
+    if args.resume is not None:
+        resume_path = Path(args.resume)
+        if not resume_path.exists():
+            print(f"ERROR: Resume checkpoint not found: {resume_path}")
+            sys.exit(1)
     
     # Create configuration
     config = TrainingConfig()
@@ -534,8 +563,8 @@ def main() -> None:
     # Set up logging
     metrics_file, checkpoint_dir = setup_logging(args.log_dir)
     
-    # Create trainer and run
-    trainer = PolicyGradientTrainer(config)
+    # Create trainer and run (with optional resume)
+    trainer = PolicyGradientTrainer(config, resume_from=args.resume)
     trainer.train(metrics_file, checkpoint_dir)
 
 

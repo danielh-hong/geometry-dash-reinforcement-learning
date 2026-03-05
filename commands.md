@@ -1,3 +1,6 @@
+## HOW TO TRAIN: (level 1, 1000 games, resume the logs)
+python train.py --episodes 1000 --difficulty 1 --seed 42 --resume logs/checkpoints/policy_ep00500.pth
+
 # Watch agent on difficulty 1 (easy, fixed level)
 python game.py --agent --weights logs/checkpoints/policy_final.pth
 
@@ -30,3 +33,11 @@ python train.py --episodes 500 --difficulty 1
 
 # Step 2: WATCH (just inference, no learning)
 python game.py --agent --difficulty 1 --weights logs/checkpoints/policy_ep100.pth
+
+How to Resume Training 🔄
+Continue from Episode 500:
+Important Notes:
+Weights are loaded ✅ - Network starts with learned knowledge
+Optimizer resets ⚠️ - Learning rate momentum starts fresh
+Episode counter restarts - Logs will show ep 1-500 again
+Use SAME difficulty/seed - For consistency, use same settings

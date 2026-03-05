@@ -377,6 +377,7 @@ class Game:
         self._next_x   : float = 0.0
         self._fixed_level     : bool = False
         self._level_dicts     : list = []
+        self._cleared_obstacles : set = set()
 
         self.surface : Optional[pygame.Surface]     = None
         self.clock   : Optional[pygame.time.Clock]  = None
@@ -410,6 +411,7 @@ class Game:
 
         self.player.reset()
         self.obstacles.clear()
+        self._cleared_obstacles.clear()
         self._scroll_x = 0.0
         self._step_n   = 0
         self._next_x   = float(C.SPAWN_X)
@@ -490,6 +492,14 @@ class Game:
         dead = self._check_collision()
 
         reward = C.REWARD_DEATH if dead else C.REWARD_ALIVE
+        
+        # Apply sparse rewards for successfully clearing obstacles
+        if not dead:
+            for obs_obj in self.obstacles:
+                if obs_obj not in self._cleared_obstacles and obs_obj.x + obs_obj.w < self.player.x:
+                    self._cleared_obstacles.add(obs_obj)
+                    reward += C.REWARD_CLEAR
+
         done   = dead
         obs = self._obs()
         self._telemetry_obs = obs
@@ -607,26 +617,42 @@ class Game:
 
         # Obstacle features (5 obstacles, 8 features each)
         MAX_OBSTACLES = 5
-        upcoming = sorted([o for o in self.obstacles if o.x + o.w >= C.PLAYER_X], key=lambda o: o.x)
+        raw_upcoming = sorted([o for o in self.obstacles if o.x + o.w >= C.PLAYER_X], key=lambda o: o.x)
         
+        # Merge adjacent obstacles of the same type to create macro-obstacles for the MLP
+        upcoming = []
+        for o in raw_upcoming:
+            if not upcoming:
+                upcoming.append({"kind": o.kind, "x": o.x, "y": o._y, "w": o.w, "h": o.h})
+                continue
+            
+            last = upcoming[-1]
+            # If same type and touching/overlapping horizontally (with 1px float tolerance)
+            if o.kind == last["kind"] and o.x <= last["x"] + last["w"] + 1.0:
+                last["w"] = (o.x + o.w) - last["x"]
+                last["y"] = min(last["y"], o._y)
+                last["h"] = max(last["h"], o.h)
+            else:
+                upcoming.append({"kind": o.kind, "x": o.x, "y": o._y, "w": o.w, "h": o.h})
+
         for i in range(MAX_OBSTACLES):
             if i < len(upcoming):
                 o = upcoming[i]
-                otype = 0.0 if o.kind == "spike" else 1.0
-                rel_x = o.x - C.PLAYER_X
-                rel_y = o._y - self.player.y
+                otype = 0.0 if o["kind"] == "spike" else 1.0
+                rel_x = o["x"] - C.PLAYER_X
+                rel_y = o["y"] - self.player.y
                 time_to_reach = rel_x / C.GAME_SPEED if C.GAME_SPEED > 0 else 0.0
                 
                 # Gap calculations (simplified)
-                gap_top = max(0.0, o._y - (self.player.y + C.PLAYER_SIZE))
-                gap_bot = max(0.0, (self.player.y - C.PLAYER_SIZE) - (o._y + o.h)) if o.kind == "block" else 0.0
+                gap_top = max(0.0, o["y"] - (self.player.y + C.PLAYER_SIZE))
+                gap_bot = max(0.0, (self.player.y - C.PLAYER_SIZE) - (o["y"] + o["h"])) if o["kind"] == "block" else 0.0
                 
                 normalized.extend([
                     otype,                                        # type: 0 or 1
                     max(0.0, min(1.0, rel_x / C.SCREEN_W)),      # rel_x normalized
                     max(-1.0, min(1.0, rel_y / C.GROUND_Y)),     # rel_y normalized
-                    o.w / C.BLOCK_SIZE / 5.0,                    # width normalized (assume max ~5 blocks)
-                    o.h / C.BLOCK_SIZE / 5.0,                    # height normalized
+                    o["w"] / C.BLOCK_SIZE / 5.0,                 # width normalized (assume max ~5 blocks)
+                    o["h"] / C.BLOCK_SIZE / 5.0,                 # height normalized
                     max(0.0, min(1.0, time_to_reach / 6.0)),    # time_to_reach normalized (0-6 seconds)
                     max(0.0, min(1.0, gap_top / C.GROUND_Y)),    # gap_top normalized
                     max(0.0, min(1.0, gap_bot / C.GROUND_Y)),    # gap_bot normalized

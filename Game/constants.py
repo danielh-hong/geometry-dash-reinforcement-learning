@@ -143,10 +143,11 @@ GAP_MAX      = 520          # px — widest gap
 
 # ── Rewards  (for the RL gym wrapper — ignored in human play mode) ────────────
 
-# Tiny reward each step the agent survives.
-# Encourages the agent to stay alive rather than doing nothing and dying fast.
-REWARD_ALIVE  =  0.05       # per step
+# No dense reward for just existing, to prevent stalling/pointless jumping exploits.
+REWARD_ALIVE  =  0.0        # per step
 
-# Large penalty on death.
-# Should outweigh any alive-reward benefit of risky behaviour.
-REWARD_DEATH  = -10.0       # on collision
+# Reward strictly for passing an obstacle successfully.
+REWARD_CLEAR  =  1.0        # per cleared obstacle
+
+# Standardized death penalty.
+REWARD_DEATH  = -1.0        # on collision

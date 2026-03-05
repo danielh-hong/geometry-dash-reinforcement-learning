@@ -6,7 +6,7 @@ Simple, clean Geometry Dash clone built to be played by humans **and** driven pr
 
 **1. Create and activate a virtual environment** (do this once)
 ```bash
-cd gd_game
+cd Game
 python -m venv venv
 
 # Mac / Linux:
