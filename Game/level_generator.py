@@ -90,6 +90,17 @@ AVAILABLE CHUNK PATTERNS
     chunk_spike_cluster         [spike][spike] gap [spike][spike]
                                 Jump into the middle gap — hard timing
 
+  MULTI-SPIKE COMBOS
+    chunk_quad_spike            4 spikes side by side
+                                Demands the earliest possible jump timing
+                                Only appears in difficulty 5–6
+    chunk_double_then_triple    [spike×2] gap [spike×3]
+                                Two-part combo — clear the double, land, then the triple
+                                Forces two consecutive precise jumps
+    chunk_triple_then_single    [spike×3] gap [spike×1]
+                                Reverse combo — clear the wide block, then nail
+                                the lone spike at the end (easy to over-jump after)
+
 ─────────────────────────────────────────────────────────────────────────────
 DIFFICULTY LEVELS
 ─────────────────────────────────────────────────────────────────────────────
@@ -117,6 +128,11 @@ DIFFICULTY LEVELS
         Patterns : maximum variety, tightest gaps, spike clusters everywhere
         Gaps     : 120–180px (0.4–0.6s) — very tight
         Real GD  : 8+ star Insane/Demon difficulty
+
+  6 — Beyond Cycles (Extreme Demon)
+        Patterns : quad spikes, double→triple combos, unrelenting chaos
+        Gaps     : 90–130px (~0.08–0.11s) — razor thin
+        Real GD  : 10-star Demon / Extreme Demon territory
 
 ─────────────────────────────────────────────────────────────────────────────
 PROGRESSIVE MODE (for RL curriculum training)
@@ -444,6 +460,35 @@ def chunk_spike_cluster(x: float) -> tuple[list[dict], float]:
     objs = [_spike(x), _spike(x + B), _spike(x + 5 * B), _spike(x + 6 * B)]
     return objs, float(7 * B)
 
+def chunk_quad_spike(x: float) -> tuple[list[dict], float]:
+    """
+    Four spikes side by side — the widest consecutive spike wall.
+    Demands the earliest possible jump to clear all four.
+    Reserved for difficulty 5 and 6 only.
+    """
+    return [_spike(x), _spike(x + B), _spike(x + 2 * B), _spike(x + 3 * B)], float(4 * B)
+
+def chunk_double_then_triple(x: float) -> tuple[list[dict], float]:
+    """
+    [spike][spike] [3B gap] [spike][spike][spike]
+    Two-part combo: clear the double, land in the gap, immediately clear the triple.
+    Forces two consecutive precise jumps in quick succession.
+    Width: 2B (double) + 3B (gap) + 3B (triple) = 8B
+    """
+    objs = [_spike(x), _spike(x + B),
+            _spike(x + 5 * B), _spike(x + 6 * B), _spike(x + 7 * B)]
+    return objs, float(8 * B)
+
+def chunk_triple_then_single(x: float) -> tuple[list[dict], float]:
+    """
+    [spike][spike][spike] [3B gap] [spike]
+    Reverse combo — clear the wide block first, then the lone spike at the end.
+    The solo spike is the tricky part: agents tend to over-jump after the triple.
+    Width: 3B (triple) + 3B (gap) + 1B (single) = 7B
+    """
+    objs = [_spike(x), _spike(x + B), _spike(x + 2 * B), _spike(x + 6 * B)]
+    return objs, float(7 * B)
+
 
 # =============================================================================
 # Difficulty pools
@@ -452,52 +497,67 @@ def chunk_spike_cluster(x: float) -> tuple[list[dict], float]:
 # Higher weight = chosen more often.
 
 POOL_1 = [   # Stereo Madness / Back On Track — lots of breathing room
-    (chunk_single_spike,           40),
+    (chunk_single_spike,           35),
     (chunk_double_spike,           20),
     (chunk_single_block_wall,      20),
     (chunk_block_platform,         15),
     (chunk_staircase_up,            5),
+    (chunk_spike_then_platform,     5),
 ]
 
 POOL_2 = [   # Polargeist / Dry Out — double spikes, spike+block combos
     (chunk_single_spike,           15),
-    (chunk_double_spike,           30),
+    (chunk_double_spike,           25),
     (chunk_single_block_wall,      15),
     (chunk_spike_on_block,         20),
     (chunk_staircase_up,           10),
     (chunk_alternating_spikes,     10),
+    (chunk_staircase_down,          5),
 ]
 
 POOL_3 = [   # Base After Base / Can't Let Go — triple spikes, combos
-    (chunk_double_spike,           15),
+    (chunk_double_spike,           10),
     (chunk_triple_spike,           25),
     (chunk_spike_on_block,         15),
     (chunk_platform_with_spike_ends, 15),
-    (chunk_spike_then_platform,    15),
+    (chunk_spike_then_platform,    10),
     (chunk_alternating_spikes,     10),
     (chunk_double_block_wall,       5),
+    (chunk_triple_then_single,     10),
 ]
 
 POOL_4 = [   # Jumper / Time Machine — dense, everything
-    (chunk_triple_spike,           30),
+    (chunk_triple_spike,           20),
     (chunk_double_spike,           10),
     (chunk_spike_on_block,         15),
-    (chunk_spike_cluster,          20),
+    (chunk_spike_cluster,          15),
     (chunk_platform_with_spike_ends, 10),
     (chunk_staircase_down,         10),
     (chunk_double_block_wall,       5),
+    (chunk_double_then_triple,     15),
 ]
 
 POOL_5 = [   # Cycles and beyond — maximum density
-    (chunk_triple_spike,           25),
-    (chunk_spike_cluster,          25),
-    (chunk_spike_on_block,         15),
-    (chunk_platform_with_spike_ends, 15),
-    (chunk_alternating_spikes,     10),
-    (chunk_staircase_down,         10),
+    (chunk_triple_spike,           15),
+    (chunk_spike_cluster,          20),
+    (chunk_spike_on_block,         10),
+    (chunk_platform_with_spike_ends, 10),
+    (chunk_alternating_spikes,      5),
+    (chunk_staircase_down,          5),
+    (chunk_quad_spike,             20),
+    (chunk_double_then_triple,     15),
 ]
 
-POOLS = {1: POOL_1, 2: POOL_2, 3: POOL_3, 4: POOL_4, 5: POOL_5}
+POOL_6 = [   # Beyond Cycles — Extreme Demon territory
+    (chunk_quad_spike,             30),
+    (chunk_double_then_triple,     25),
+    (chunk_triple_spike,           20),
+    (chunk_spike_cluster,          15),
+    (chunk_triple_then_single,      5),
+    (chunk_platform_with_spike_ends, 5),
+]
+
+POOLS = {1: POOL_1, 2: POOL_2, 3: POOL_3, 4: POOL_4, 5: POOL_5, 6: POOL_6}
 
 # Gap BETWEEN chunks at each difficulty (in pixels).
 # This is the breathing room between obstacle groups.
@@ -508,6 +568,7 @@ GAPS = {
     3: (180, 300),    # tighter       — 0.6s to 1.0s
     4: (150, 240),    # tight         — 0.5s to 0.8s
     5: (120, 180),    # very tight    — 0.4s to 0.6s
+    6: ( 90, 130),    # razor thin    — ~0.08–0.11s
 }
 
 
@@ -536,7 +597,7 @@ class LevelGenerator:
         seed        : Optional[int] = None,
         progressive : bool          = False,
     ) -> None:
-        assert 1 <= difficulty <= 5, "difficulty must be 1–5"
+        assert 1 <= difficulty <= 6, "difficulty must be 1–6"
         self.difficulty  = difficulty
         self.progressive = progressive
         self._rng        = random.Random(seed)
