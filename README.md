@@ -13,7 +13,7 @@ python -m venv venv
 source venv/bin/activate
 
 # Windows:
-venv\Scripts\activate
+venv\Scripts\activate # make sure to activate venv
 ```
 You'll see `(venv)` in your terminal prompt — that means it's active.
 
