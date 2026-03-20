@@ -40,6 +40,7 @@ import constants as C
 from game import Game
 from level_generator import LevelGenerator
 from rl_model import SimplePolicyNetwork
+from training_plots import generate_training_plots
 
 
 # =============================================================================
@@ -52,13 +53,17 @@ class TrainingConfig:
     num_episodes: int = 1000
     learning_rate: float = 1e-3
     discount_factor: float = 0.99  # γ (gamma) — discount future rewards
-    device: str = "cpu"
+    device: str = "auto"
     checkpoint_interval: int = 50  # Save weights every N episodes
     seed: int = 42
     difficulty: int = 1
     level_length: int = 6000  # pixels per level (~20 seconds at normal speed)
     render: bool = False  # Render game window during training
     log_dir: str = "logs"
+    figure_dir: str = "training_figures"
+    cpu_threads: int = 0  # 0 = use PyTorch default threading
+    use_amp: bool = False
+    plot_after_training: bool = True
 
 
 # =============================================================================
@@ -211,6 +216,10 @@ class PolicyGradientTrainer:
             self.policy.parameters(),
             lr=config.learning_rate
         )
+
+        # Optional mixed precision (GPU only)
+        self.use_amp = config.use_amp and config.device == "cuda"
+        self.grad_scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
         
         # Track episode rewards for running average
         self.episode_rewards = []
@@ -337,26 +346,31 @@ class PolicyGradientTrainer:
         )
         
         # Step 4: Forward pass — get action probabilities
-        logits = self.policy.forward(obs_tensor)  # Shape: (T, 2)
-        log_probs = F.log_softmax(logits, dim=1)  # Shape: (T, 2)
-        
-        # Step 5: Get log probability of taken actions
-        # actions_tensor is (T,), we need to gather the correct logits
-        action_log_probs = log_probs.gather(1, actions_tensor.unsqueeze(1)).squeeze(1)
-        
-        # Step 6: Compute REINFORCE loss
-        # Loss = -mean(log_prob * return)
-        # This encourages actions with positive returns and discourages negative ones
-        loss = -(action_log_probs * returns_tensor).mean()
-        
+        with torch.autocast(device_type="cuda", enabled=self.use_amp):
+            logits = self.policy.forward(obs_tensor)  # Shape: (T, 2)
+            log_probs = F.log_softmax(logits, dim=1)  # Shape: (T, 2)
+
+            # Step 5: Get log probability of taken actions
+            # actions_tensor is (T,), we need to gather the correct logits
+            action_log_probs = log_probs.gather(1, actions_tensor.unsqueeze(1)).squeeze(1)
+
+            # Step 6: Compute REINFORCE loss
+            # Loss = -mean(log_prob * return)
+            # This encourages actions with positive returns and discourages negative ones
+            loss = -(action_log_probs * returns_tensor).mean()
+
         # Step 7: Gradient step
-        self.optimizer.zero_grad()
-        loss.backward()
-        
-        # Clip gradients to prevent exploding gradients
-        torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=1.0)
-        
-        self.optimizer.step()
+        self.optimizer.zero_grad(set_to_none=True)
+        if self.use_amp:
+            self.grad_scaler.scale(loss).backward()
+            self.grad_scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=1.0)
+            self.grad_scaler.step(self.optimizer)
+            self.grad_scaler.update()
+        else:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=1.0)
+            self.optimizer.step()
         
         return loss.item()
     
@@ -387,6 +401,8 @@ class PolicyGradientTrainer:
         print(f"  Device            : {self.config.device}")
         print(f"  Difficulty        : {self.config.difficulty}")
         print(f"  Seed              : {self.config.seed}")
+        print(f"  CPU threads       : {torch.get_num_threads()}")
+        print(f"  Mixed precision   : {'on' if self.use_amp else 'off'}")
         print(f"  Metrics log       : {metrics_file}")
         print(f"  Checkpoints saved : {checkpoint_dir}")
         print("=" * 80)
@@ -466,6 +482,15 @@ class PolicyGradientTrainer:
         print()
         print(f"  Metrics log: {metrics_file}")
         print(f"  Final model: {final_path}")
+        if self.config.plot_after_training:
+            figure_path = generate_training_plots(
+                metrics_file=metrics_file,
+                output_dir=self.config.figure_dir
+            )
+            if figure_path is not None:
+                print(f"  Training figure: {figure_path}")
+            else:
+                print("  Training figure: skipped (matplotlib not installed or no metrics)")
         print(f"  All saved to: {self.config.log_dir}/")
         print("=" * 80)
 
@@ -518,15 +543,37 @@ def main() -> None:
     parser.add_argument(
         "--device",
         type=str,
-        default="cpu",
-        choices=["cpu", "cuda"],
-        help="Device to train on (default: cpu)"
+        default="auto",
+        choices=["auto", "cpu", "cuda"],
+        help="Device to train on: auto|cpu|cuda (default: auto)"
+    )
+    parser.add_argument(
+        "--cpu-threads",
+        type=int,
+        default=0,
+        help="Number of CPU threads for PyTorch (default: 0 = PyTorch default)"
+    )
+    parser.add_argument(
+        "--amp",
+        action="store_true",
+        help="Enable mixed precision training on CUDA (can speed up GPU training)"
     )
     parser.add_argument(
         "--log-dir",
         type=str,
         default="logs",
         help="Directory for logs and checkpoints (default: logs)"
+    )
+    parser.add_argument(
+        "--figure-dir",
+        type=str,
+        default="training_figures",
+        help="Directory for generated training plots (default: training_figures)"
+    )
+    parser.add_argument(
+        "--no-plot",
+        action="store_true",
+        help="Disable automatic plot generation after training"
     )
     parser.add_argument(
         "--resume",
@@ -553,8 +600,22 @@ def main() -> None:
     config.difficulty = args.difficulty
     config.seed = args.seed
     config.render = args.render
-    config.device = args.device
+    if args.device == "auto":
+        config.device = "cuda" if torch.cuda.is_available() else "cpu"
+    elif args.device == "cuda" and not torch.cuda.is_available():
+        print("WARNING: CUDA requested but not available. Falling back to CPU.")
+        config.device = "cpu"
+    else:
+        config.device = args.device
     config.log_dir = args.log_dir
+    config.figure_dir = args.figure_dir
+    config.cpu_threads = max(0, args.cpu_threads)
+    config.use_amp = args.amp
+    config.plot_after_training = not args.no_plot
+
+    # Optional CPU thread tuning
+    if config.cpu_threads > 0:
+        torch.set_num_threads(config.cpu_threads)
     
     # Set seeds for reproducibility
     torch.manual_seed(args.seed)

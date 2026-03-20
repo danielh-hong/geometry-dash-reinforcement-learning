@@ -1,6 +1,9 @@
 pygame>=2.5.0
 numpy>=1.24.0
 torch>=2.10.0
+matplotlib>=3.8.0
+gymnasium>=0.29.1
+stable-baselines3>=2.3.2
 
 # RL (install when ready)
 # gymnasium>=0.29.0
