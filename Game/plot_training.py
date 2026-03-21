@@ -1,29 +1,36 @@
-import pandas as pd
-import matplotlib.pyplot as plt
-import sys
+import argparse
 from pathlib import Path
 
-# ── change this to your actual CSV filename ───────────────────────────────────
-CSV_PATH = "logs/training_metrics_20260302_130457.csv"
+from training_plots import generate_training_plots
 
-df = pd.read_csv(CSV_PATH)
 
-fig, ax = plt.subplots(figsize=(8, 4))
+def main() -> None:
+        parser = argparse.ArgumentParser(
+                description="Generate reward/loss training plots from metrics CSV"
+        )
+        parser.add_argument(
+                "--metrics-file",
+                type=str,
+                required=True,
+                help="Path to training metrics CSV file"
+        )
+        parser.add_argument(
+                "--output-dir",
+                type=str,
+                default="training_figures",
+                help="Directory to save generated figure (default: training_figures)"
+        )
+        args = parser.parse_args()
 
-# Raw episode reward (faint)
-ax.plot(df["episode"], df["episode_reward"],
-        color="steelblue", alpha=0.25, linewidth=0.8, label="Episode reward")
+        output_file = generate_training_plots(
+                metrics_file=args.metrics_file,
+                output_dir=args.output_dir
+        )
 
-# 100-episode rolling average (bold)
-ax.plot(df["episode"], df["avg_reward_100"],
-        color="steelblue", linewidth=2.0, label="100-ep rolling average")
+        if output_file is None:
+                print("Failed to generate figure. Check metrics path and matplotlib installation.")
+        else:
+                print(f"Saved to {output_file}")
 
-ax.set_xlabel("Episode")
-ax.set_ylabel("Total Reward")
-ax.set_title("Training Progress — REINFORCE on Fixed Difficulty-1 Level")
-ax.legend()
-ax.grid(True, alpha=0.3)
-
-plt.tight_layout()
-plt.savefig("figures/training_curve.png", dpi=150)
-print("Saved to figures/training_curve.png")
+if __name__ == "__main__":
+        main()
