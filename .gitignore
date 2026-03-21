@@ -9,3 +9,4 @@ data/
 *.zip
 *.pkl
 logs_*
+*.pt
