@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 import mss
-from ultralytics import YOLOWorld
+from ultralytics import YOLO
 
 # Check of cuda availability for faster inference
 import torch
@@ -16,24 +16,27 @@ GROUND_Y = 864
 BLOCK_SIZE = 112
 GAME_SPEED = 1163.22
 
-model = YOLOWorld("yolov8m-worldv2.pt")
+# model = YOLO("yolov8m.pt")
+model = YOLO("../runs/detect/train11/weights/best.pt")
 if torch.cuda.is_available():
     model.to("cuda")
-model.set_classes(["spike", "triangle", "white spike", "white triangle", "block", "square block", "player", "green square"])
 
-SPIKE_NAMES = {"spike", "triangle", "white spike", "white triangle"}
-BLOCK_NAMES = {"block", "square block"}
-PLAYER_NAMES = {"player", "green square"}
+SPIKE_NAMES = {"spike", "spike2", "spike3"}
+BLOCK_NAMES = {"block", "block2", "block3"}
+PLAYER_NAMES = {"player"}
 
 sct = mss.mss()
 monitor = sct.monitors[1]
 
 # Adjust to your game lane
-X0, Y0, X1, Y1 = 567, 633, 1966, 931
+X0, Y0, X1, Y1 = 758, 55, 2035, 1162
 
 last_spike = None
 last_seen_frame = -999
 frame_idx = 0
+
+cv2.namedWindow("Detection", cv2.WINDOW_AUTOSIZE)
+cv2.setWindowProperty("Detection", cv2.WND_PROP_TOPMOST, 1)
 
 while True:
     screenshot = sct.grab(monitor)
@@ -41,9 +44,8 @@ while True:
     frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
 
     roi = frame[Y0:Y1, X0:X1]
-    roi = cv2.resize(roi, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
 
-    results = model.predict(roi, conf=0.01, imgsz=640, verbose=False)[0]
+    results = model.predict(roi, conf=0.4, imgsz=640, verbose=False)[0]
 
     detections = []
     for box in results.boxes:
@@ -100,8 +102,12 @@ while True:
 
     frame_idx += 1
 
-    annotated = results.plot()
-    cv2.imshow("Detection", annotated)
+    # In newer ultralytics versions, plot() accepts 'conf' as boolean, but filters via the predict threshold
+    annotated = results.plot(conf=True)
+    
+    # Resize display to half size
+    display_img = cv2.resize(annotated, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
+    cv2.imshow("Detection", display_img)
     
 
     if cv2.waitKey(1) & 0xFF == ord("q"):

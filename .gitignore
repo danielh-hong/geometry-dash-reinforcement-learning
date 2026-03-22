@@ -8,5 +8,8 @@ logs/
 data/
 *.zip
 *.pkl
+
+// Custom
 logs_*
 *.pt
+runs/
