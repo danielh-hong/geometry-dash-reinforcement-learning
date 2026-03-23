@@ -14,3 +14,7 @@ logs_*
 *.pt
 !Cv/saved_params/best.pt
 runs/
+
+
+logs_ppo
+logs_phase_11_diff2_double_guaranteed
