@@ -27,17 +27,32 @@ from game import Game
 from level_generator import LevelGenerator
 
 
+def _adapt_obs_for_model(model: PPO, obs_norm: np.ndarray) -> np.ndarray:
+    """Pad/truncate observation so it matches the loaded PPO model input size."""
+    expected_shape = getattr(model.observation_space, "shape", None)
+    expected_dim = int(expected_shape[0]) if expected_shape else obs_norm.shape[0]
+    current_dim = int(obs_norm.shape[0])
+
+    if current_dim == expected_dim:
+        return obs_norm
+    if current_dim < expected_dim:
+        pad = np.zeros((expected_dim - current_dim,), dtype=np.float32)
+        return np.concatenate([obs_norm.astype(np.float32, copy=False), pad], axis=0)
+    return obs_norm[:expected_dim].astype(np.float32, copy=False)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Watch PPO model play Geometry Dash")
     parser.add_argument("--model", type=str, required=True, help="Path to PPO .zip model")
     parser.add_argument("--difficulty", type=int, default=1, help="Level difficulty (1-5)")
     parser.add_argument("--seed", type=int, default=42, help="Seed for reproducible level")
-    parser.add_argument("--length", type=int, default=6000, help="Level length in pixels")
+    parser.add_argument("--length", type=int, default=9000, help="Level length in pixels")
+    parser.add_argument("--staircase-only", action="store_true", help="Use staircase-only generated test level")
     parser.add_argument(
         "--action-repeat",
         type=int,
-        default=4,
-        help="Hold each predicted action for N frames (default: 4, matches PPO training env)",
+        default=1,
+        help="Hold each predicted action for N frames (default: 1, matches PPO training env)",
     )
     parser.add_argument(
         "--show-probs",
@@ -83,7 +98,10 @@ def main() -> None:
         seed=args.seed,
         progressive=False,
     )
-    level_obstacles = level_gen.generate(length=args.length)
+    if args.staircase_only:
+        level_obstacles = level_gen.generate_staircase_only(length=args.length)
+    else:
+        level_obstacles = level_gen.generate(length=args.length)
 
     game = Game(render=True, seed=args.seed, debug=False, agent_policy=None)
     game.load_level(level_obstacles)
@@ -138,6 +156,7 @@ def main() -> None:
         # that action between decisions.
         if frame_index % max(1, args.action_repeat) == 0:
             obs_norm = np.asarray(game.get_normalized_observation(), dtype=np.float32)
+            obs_norm = _adapt_obs_for_model(model, obs_norm)
             current_action, current_probs = _get_policy_action_and_probs(model, obs_norm)
             decision_index += 1
 

@@ -65,8 +65,9 @@ AVAILABLE CHUNK PATTERNS
   BLOCK OBSTACLES
     chunk_single_block_wall     3-wide × 1-tall block wall
                                 Player jumps over or lands on top
-    chunk_double_block_wall     2-wide × 2-tall block wall
-                                Must jump OVER — landing on top too risky
+    [REMOVED] chunk_double_block_wall     2-wide × 2-tall block wall
+                                Cannot be jumped on or over — removed from all
+                                difficulty levels
     chunk_block_platform        5-wide × 1-tall flat platform
                                 Player runs along the top or vaults over
     chunk_spike_on_block        Spike sitting on top of a 3-wide block
@@ -424,6 +425,56 @@ def chunk_staircase_down(x: float, steps: int = 3) -> tuple[list[dict], float]:
             objs.extend(_block(sx + col * B, stack=height))
     return objs, float(steps * step_w * B)
 
+def chunk_staircase_up_wide(x: float, steps: int = 3) -> tuple[list[dict], float]:
+    """
+    Wider ascending staircase for learning — 4 blocks per step instead of 3.
+    More forgiving landing zone to master the rhythm.
+    """
+    objs: list[dict] = []
+    step_w = 4  # more forgiving width
+    for i in range(steps):
+        sx = x + i * step_w * B
+        for col in range(step_w):
+            objs.extend(_block(sx + col * B, stack=i + 1))
+    return objs, float(steps * step_w * B)
+
+def chunk_staircase_up_with_spike(x: float, steps: int = 3) -> tuple[list[dict], float]:
+    """
+    Ascending staircase with a spike on top of the highest step.
+    Forces player to land, then immediately jump over spike.
+    """
+    objs: list[dict] = []
+    step_w = 3
+    for i in range(steps):
+        sx = x + i * step_w * B
+        for col in range(step_w):
+            objs.extend(_block(sx + col * B, stack=i + 1))
+    # Spike on top of final step
+    final_step_x = x + (steps - 1) * step_w * B
+    objs.append(_spike(final_step_x + step_w * B))
+    return objs, float((steps * step_w + 1) * B)
+
+def chunk_staircase_double(x: float) -> tuple[list[dict], float]:
+    """
+    Two 3-step staircases back-to-back: up-up-up, then up-up-up again.
+    No gap between them — continuous rhythm learning.
+    """
+    objs: list[dict] = []
+    step_w = 3
+    steps = 3
+    # First staircase
+    for i in range(steps):
+        sx = x + i * step_w * B
+        for col in range(step_w):
+            objs.extend(_block(sx + col * B, stack=i + 1))
+    # Second staircase (resets height)
+    x_offset = steps * step_w * B
+    for i in range(steps):
+        sx = x + x_offset + i * step_w * B
+        for col in range(step_w):
+            objs.extend(_block(sx + col * B, stack=i + 1))
+    return objs, float(2 * steps * step_w * B)
+
 # ── Rhythm patterns ───────────────────────────────────────────────────────────
 
 def chunk_alternating_spikes(x: float) -> tuple[list[dict], float]:
@@ -438,6 +489,14 @@ def chunk_alternating_spikes(x: float) -> tuple[list[dict], float]:
     to land safely and take off again before hitting the next spike.
     """
     return [_spike(x), _spike(x + 4 * B), _spike(x + 8 * B)], float(9 * B)
+
+def chunk_spike_gate(x: float) -> tuple[list[dict], float]:
+    """
+    [spike] [3-block safe gap] [spike]
+    Forces timing to jump into the middle gap, then jump out cleanly.
+    This is a core "in-and-out" rhythm pattern for curriculum training.
+    """
+    return [_spike(x), _spike(x + 4 * B)], float(5 * B)
 
 def chunk_spike_then_platform(x: float) -> tuple[list[dict], float]:
     """
@@ -460,24 +519,9 @@ def chunk_spike_cluster(x: float) -> tuple[list[dict], float]:
     objs = [_spike(x), _spike(x + B), _spike(x + 5 * B), _spike(x + 6 * B)]
     return objs, float(7 * B)
 
-def chunk_quad_spike(x: float) -> tuple[list[dict], float]:
-    """
-    Four spikes side by side — the widest consecutive spike wall.
-    Demands the earliest possible jump to clear all four.
-    Reserved for difficulty 5 and 6 only.
-    """
-    return [_spike(x), _spike(x + B), _spike(x + 2 * B), _spike(x + 3 * B)], float(4 * B)
-
-def chunk_double_then_triple(x: float) -> tuple[list[dict], float]:
-    """
-    [spike][spike] [3B gap] [spike][spike][spike]
-    Two-part combo: clear the double, land in the gap, immediately clear the triple.
-    Forces two consecutive precise jumps in quick succession.
-    Width: 2B (double) + 3B (gap) + 3B (triple) = 8B
-    """
-    objs = [_spike(x), _spike(x + B),
-            _spike(x + 5 * B), _spike(x + 6 * B), _spike(x + 7 * B)]
-    return objs, float(8 * B)
+def chunk_flat_ground(x: float) -> tuple[list[dict], float]:
+    """Just empty space to teach the agent that waiting on flat ground is safe."""
+    return [], float(10 * B)
 
 def chunk_triple_then_single(x: float) -> tuple[list[dict], float]:
     """
@@ -491,84 +535,65 @@ def chunk_triple_then_single(x: float) -> tuple[list[dict], float]:
 
 
 # =============================================================================
-# Difficulty pools
+# Difficulty pools (CURRICULUM PHASES)
 # =============================================================================
 # Each entry: (chunk_function, relative_weight)
 # Higher weight = chosen more often.
 
-POOL_1 = [   # Stereo Madness / Back On Track — lots of breathing room
-    (chunk_single_spike,           35),
+POOL_1 = [   # Phase 1: Single-spike mastery only
+    (chunk_single_spike,          100),
+]
+
+POOL_2 = [   # Phase 2: More variety, still forgiving
+    (chunk_single_spike,           12),
+    (chunk_double_spike,           50),
+    (chunk_single_block_wall,      16),
+    (chunk_spike_gate,             10),
+    (chunk_alternating_spikes,      4),
+    (chunk_spike_then_platform,     4),
+    (chunk_spike_on_block,          4),
+]
+
+POOL_3 = [   # Phase 3: Verticality + first harder spike motifs
     (chunk_double_spike,           20),
-    (chunk_single_block_wall,      20),
-    (chunk_block_platform,         15),
-    (chunk_staircase_up,            5),
-    (chunk_spike_then_platform,     5),
-]
-
-POOL_2 = [   # Polargeist / Dry Out — double spikes, spike+block combos
-    (chunk_single_spike,           15),
-    (chunk_double_spike,           25),
     (chunk_single_block_wall,      15),
-    (chunk_spike_on_block,         20),
-    (chunk_staircase_up,           10),
+    (chunk_staircase_up,           20),
+    (chunk_spike_gate,             15),
     (chunk_alternating_spikes,     10),
-    (chunk_staircase_down,          5),
+    (chunk_spike_cluster,           5),
 ]
 
-POOL_3 = [   # Base After Base / Can't Let Go — triple spikes, combos
-    (chunk_double_spike,           10),
-    (chunk_triple_spike,           25),
-    (chunk_spike_on_block,         15),
-    (chunk_platform_with_spike_ends, 15),
+POOL_4 = [   # Phase 4: Combo-heavy with occasional dense spikes
+    (chunk_double_spike,           14),
+    (chunk_triple_spike,           10),
+    (chunk_spike_on_block,         14),
+    (chunk_spike_gate,             18),
+    (chunk_alternating_spikes,     16),
     (chunk_spike_then_platform,    10),
-    (chunk_alternating_spikes,     10),
-    (chunk_double_block_wall,       5),
-    (chunk_triple_then_single,     10),
-]
-
-POOL_4 = [   # Jumper / Time Machine — dense, everything
-    (chunk_triple_spike,           20),
-    (chunk_double_spike,           10),
-    (chunk_spike_on_block,         15),
-    (chunk_spike_cluster,          15),
     (chunk_platform_with_spike_ends, 10),
-    (chunk_staircase_down,         10),
-    (chunk_double_block_wall,       5),
-    (chunk_double_then_triple,     15),
+    (chunk_spike_cluster,           8),
 ]
 
-POOL_5 = [   # Cycles and beyond — maximum density
-    (chunk_triple_spike,           15),
+POOL_5 = [   # Phase 5: High density with broad pattern coverage
+    (chunk_triple_spike,           24),
     (chunk_spike_cluster,          20),
-    (chunk_spike_on_block,         10),
-    (chunk_platform_with_spike_ends, 10),
-    (chunk_alternating_spikes,      5),
-    (chunk_staircase_down,          5),
-    (chunk_quad_spike,             20),
-    (chunk_double_then_triple,     15),
+    (chunk_triple_then_single,     16),
+    (chunk_spike_on_block,         12),
+    (chunk_spike_gate,             12),
+    (chunk_alternating_spikes,     10),
+    (chunk_platform_with_spike_ends, 6),
 ]
 
-POOL_6 = [   # Beyond Cycles — Extreme Demon territory
-    (chunk_quad_spike,             30),
-    (chunk_double_then_triple,     25),
-    (chunk_triple_spike,           20),
-    (chunk_spike_cluster,          15),
-    (chunk_triple_then_single,      5),
-    (chunk_platform_with_spike_ends, 5),
-]
+POOLS = {1: POOL_1, 2: POOL_2, 3: POOL_3, 4: POOL_4, 5: POOL_5, 6: POOL_5}  # Cap at Phase 5
 
-POOLS = {1: POOL_1, 2: POOL_2, 3: POOL_3, 4: POOL_4, 5: POOL_5, 6: POOL_6}
-
-# Gap BETWEEN chunks at each difficulty (in pixels).
-# This is the breathing room between obstacle groups.
-# At 300px/s: 180px = 0.6s, 360px = 1.2s, 540px = 1.8s
+# Gap BETWEEN chunks at each difficulty (Calculated dynamically via actual Game Speed)
 GAPS = {
-    1: (360, 540),    # lots of space — 1.2s to 1.8s
-    2: (270, 420),    # comfortable   — 0.9s to 1.4s
-    3: (180, 300),    # tighter       — 0.6s to 1.0s
-    4: (150, 240),    # tight         — 0.5s to 0.8s
-    5: (120, 180),    # very tight    — 0.4s to 0.6s
-    6: ( 90, 130),    # razor thin    — ~0.08–0.11s
+    1: (int(0.35 * C.GAME_SPEED), int(0.60 * C.GAME_SPEED)), # 0.35s to 0.60s (many single spikes with clear spacing)
+    2: (int(1.0 * C.GAME_SPEED), int(1.5 * C.GAME_SPEED)), # 1.0s to 1.5s (Comfortable)
+    3: (int(0.8 * C.GAME_SPEED), int(1.2 * C.GAME_SPEED)), # 0.8s to 1.2s (Standard)
+    4: (int(0.6 * C.GAME_SPEED), int(0.9 * C.GAME_SPEED)), # 0.6s to 0.9s (Tight)
+    5: (int(0.4 * C.GAME_SPEED), int(0.6 * C.GAME_SPEED)), # 0.4s to 0.6s (Very Tight)
+    6: (int(0.4 * C.GAME_SPEED), int(0.6 * C.GAME_SPEED)), # Cap at Phase 5 limits
 }
 
 
@@ -616,6 +641,7 @@ class LevelGenerator:
         list[dict] — obstacle dicts sorted by x, ready for Game.load_level()
         """
         obstacles: list[dict] = []
+        chunks_since_double_spike = 0
 
         # Start well past the right edge so first obstacle scrolls in naturally.
         # 1.5s of run-up at 300px/s = 450px buffer.
@@ -630,15 +656,75 @@ class LevelGenerator:
             else:
                 cur_diff = self.difficulty
 
-            # Pick and place a chunk
-            chunk_fn          = self._weighted_choice(POOLS[cur_diff])
+            # Pick and place a chunk.
+            # Difficulty-2 anti-starvation rule: if we go too long without a
+            # double spike, force one so training consistently sees this case.
+            if cur_diff == 2 and chunks_since_double_spike >= 3:
+                chunk_fn = chunk_double_spike
+            else:
+                chunk_fn = self._weighted_choice(POOLS[cur_diff])
+
             chunk_objs, width = chunk_fn(x)
             obstacles.extend(chunk_objs)
             x += width
 
+            if chunk_fn is chunk_double_spike:
+                chunks_since_double_spike = 0
+            elif cur_diff == 2:
+                chunks_since_double_spike += 1
+            else:
+                chunks_since_double_spike = 0
+
             # Add gap before next chunk
             gap_min, gap_max = GAPS[cur_diff]
             x += self._rng.randint(gap_min, gap_max)
+
+        obstacles.sort(key=lambda o: o["x"])
+        return obstacles
+
+    def generate_staircase_only(self, length: int = 9000) -> list[dict]:
+        """
+        Special training mode: ALL staircases with variations.
+        No spikes, no clusters — just staircase patterns to master the timing.
+
+        Alternates between:
+        - Standard 3-block-wide staircases (chunk_staircase_up)
+        - Wider 4-block staircases (chunk_staircase_up_wide)
+        - Double staircases back-to-back (chunk_staircase_double)
+        - Staircases with spike on top (chunk_staircase_up_with_spike)
+
+        Parameters
+        ----------
+        length : int
+            Level length in pixels (~9000px ≈ 30s at 300px/s)
+
+        Returns
+        -------
+        list[dict] — obstacle dicts (all staircases + spikes)
+        """
+        obstacles: list[dict] = []
+        staircase_pool = [
+            chunk_staircase_up,
+            chunk_staircase_up_wide,
+            chunk_staircase_double,
+            chunk_staircase_up_with_spike,
+        ]
+
+        x = float(C.SCREEN_W + C.GAME_SPEED * 1.5)  # Start offscreen
+        pattern_idx = 0
+
+        while x < length + C.SCREEN_W:
+            # Cycle through staircase patterns
+            chunk_fn = staircase_pool[pattern_idx % len(staircase_pool)]
+            pattern_idx += 1
+
+            chunk_objs, width = chunk_fn(x)
+            obstacles.extend(chunk_objs)
+            x += width
+
+            # Small gap between staircases (0.3s–0.5s)
+            gap = self._rng.randint(int(0.3 * C.GAME_SPEED), int(0.5 * C.GAME_SPEED))
+            x += gap
 
         obstacles.sort(key=lambda o: o["x"])
         return obstacles

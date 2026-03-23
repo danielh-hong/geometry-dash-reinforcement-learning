@@ -10,14 +10,14 @@
 #
 # ── OBSERVATION SPACE ─────────────────────────────────────────────────────
 #
-#   The normalized observation vector has 45 floats:
+#   The normalized observation vector has 28 floats:
 #
 #   [0:3]                Player state (3 values)
 #       0: player_y         — vertical position normalized to [0, 1]
 #       1: player_vy        — vertical velocity normalized to [-1, 1]
 #       2: on_ground        — binary: 0.0 or 1.0
 #
-#   [3:43]               Upcoming obstacles (5 obstacles × 8 features each)
+#   [3:27]               Upcoming obstacles (3 obstacles × 8 features each)
 #       Per obstacle i:
 #         0: type           — 0.0 (spike) or 1.0 (block)
 #         1: rel_x          — horizontal distance to player, [0, 1]
@@ -28,13 +28,12 @@
 #         6: gap_top        — vertical clearance above, [0, 1]
 #         7: gap_bottom     — vertical clearance below, [0, 1]
 #
-#   [43:44]              Derived features (2 values)
-#       43: is_jump_possible  — duplicate of on_ground (helps agent learn)
-#       44: last_action       — previous action taken by agent (0 or 1)
+#   [27]                 Derived feature (1 value)
+#       27: is_jump_possible  — duplicate of on_ground (helps agent learn)
 #
 # ── NETWORK ARCHITECTURE ──────────────────────────────────────────────────
 #
-#   Input layer:  45 floats (normalized observation)
+#   Input layer:  28 floats (normalized observation)
 #   Hidden layer: 128 neurons (ReLU activation)
 #   Hidden layer: 64 neurons (ReLU activation)
 #   Output layer: 2 neurons (jump/no-jump logits, softmax for probability)
@@ -87,7 +86,7 @@ class ObservationSpec:
     """
 
     # Observation vector size
-    OBSERVATION_SIZE = 45
+    OBSERVATION_SIZE = 28
     
     # Player state normalization ranges
     PLAYER_Y_MAX = float(C.SCREEN_H)           # Screen height in pixels
@@ -130,7 +129,7 @@ class SimplePolicyNetwork(nn.Module):
     Simple feedforward policy network for binary action prediction (jump / no-jump).
     
     Architecture:
-        Input(45) → Dense(128, ReLU) → Dense(64, ReLU) → Output(2, Softmax)
+        Input(28) → Dense(128, ReLU) → Dense(64, ReLU) → Output(2, Softmax)
     
     This is a minimal network designed for:
     - Fast training on standard RL algorithms (PPO, DQN)
@@ -142,7 +141,7 @@ class SimplePolicyNetwork(nn.Module):
     Parameters
     ----------
     input_size : int
-        Size of the normalized observation vector (default: 45).
+        Size of the normalized observation vector (default: 28).
     hidden_size : int
         Number of neurons in hidden layers (default: 128).
     device : str
@@ -152,7 +151,7 @@ class SimplePolicyNetwork(nn.Module):
     --------
     >>> import torch
     >>> policy = SimplePolicyNetwork(device="cpu")
-    >>> obs = torch.randn(1, 45)
+    >>> obs = torch.randn(1, 28)
     >>> logits = policy(obs)  # Shape: (1, 2)
     >>> action_probs = torch.softmax(logits, dim=1)
     >>> action = torch.argmax(action_probs, dim=1).item()
@@ -160,7 +159,7 @@ class SimplePolicyNetwork(nn.Module):
 
     def __init__(
         self,
-        input_size: int = 45,
+        input_size: int = 28,
         hidden_size: int = 128,
         device: str = "cpu",
     ) -> None:
@@ -204,7 +203,7 @@ class SimplePolicyNetwork(nn.Module):
         Parameters
         ----------
         obs : list[float] or torch.Tensor
-            Normalized observation vector of size 45.
+            Normalized observation vector of size 28.
         
         Returns
         -------

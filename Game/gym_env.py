@@ -31,7 +31,7 @@ It only wraps your game so RL code can plug in cleanly.
 
 Design choices in this wrapper
 ------------------------------
-1) Observation space is a fixed float vector of size 45, matching
+1) Observation space is a fixed float vector of size 29, matching
    Game.get_normalized_observation().
 2) Action space is Discrete(2):
       0 = no-op, 1 = jump
@@ -66,7 +66,7 @@ class GdEnvConfig:
     """Configuration for GeometryDashGymEnv."""
 
     difficulty: int = 1
-    level_length: int = 6000
+    level_length: int = 9000
     seed: int = 42
 
     # If True, each episode uses a new seed (seed + episode_index), improving
@@ -76,8 +76,11 @@ class GdEnvConfig:
     # LevelGenerator progressive mode (curriculum inside each generated level).
     progressive: bool = False
 
+    # Special training mode: only staircases, no spikes/clusters (for staircase mastery).
+    staircase_only: bool = False
+
     # Environment runtime limits.
-    action_repeat: int = 4
+    action_repeat: int = 1
     max_steps_per_episode: int = 2500
 
     # Optional reward shaping to discourage jump-spam and encourage survival.
@@ -87,10 +90,6 @@ class GdEnvConfig:
     air_jump_penalty: float = 0.0
     unnecessary_jump_penalty: float = 0.0
     jump_danger_distance_px: float = 140.0
-
-    # Optional feature tweak for PPO: suppress last_action input to reduce
-    # autoregressive jump-loop behavior.
-    zero_last_action_feature: bool = False
 
     # Rendering is generally False for training speed, True for debugging.
     render: bool = False
@@ -102,7 +101,7 @@ class GeometryDashGymEnv(gym.Env):
 
     Observation
     -----------
-    np.ndarray shape=(45,), dtype=np.float32
+    np.ndarray shape=(28,), dtype=np.float32
 
     Action
     ------
@@ -132,12 +131,13 @@ class GeometryDashGymEnv(gym.Env):
         self.observation_space = spaces.Box(
             low=-10.0,
             high=10.0,
-            shape=(45,),
+            shape=(28,),
             dtype=np.float32,
         )
 
         self._episode_index = 0
         self._step_count = 0
+        self._prev_action_int = 0
 
         self._game: Optional[Game] = None
         self._current_level = None
@@ -160,7 +160,10 @@ class GeometryDashGymEnv(gym.Env):
             seed=seed_for_episode,
             progressive=self.config.progressive,
         )
-        return level_gen.generate(length=self.config.level_length)
+        if self.config.staircase_only:
+            return level_gen.generate_staircase_only(length=self.config.level_length)
+        else:
+            return level_gen.generate(length=self.config.level_length)
 
     def _ensure_game_initialized(self) -> None:
         """Create Game instance lazily so reset() can be called repeatedly."""
@@ -170,10 +173,7 @@ class GeometryDashGymEnv(gym.Env):
     def _current_observation(self) -> np.ndarray:
         """Get normalized observation as np.float32 vector."""
         assert self._game is not None
-        obs = self._game.get_normalized_observation()
-        if self.config.zero_last_action_feature and len(obs) >= 45:
-            obs[-1] = 0.0
-        return np.asarray(obs, dtype=np.float32)
+        return np.asarray(self._game.get_normalized_observation(), dtype=np.float32)
 
     def _nearest_obstacle_distance_px(self) -> Optional[float]:
         """Return distance in px from player front to nearest upcoming obstacle."""
@@ -215,6 +215,7 @@ class GeometryDashGymEnv(gym.Env):
 
         self._ensure_game_initialized()
         self._step_count = 0
+        self._prev_action_int = 0
 
         self._current_level = self._build_level_for_episode()
         self._game.load_level(self._current_level)
@@ -238,7 +239,9 @@ class GeometryDashGymEnv(gym.Env):
         self._step_count += 1
 
         action_int = int(action)
+        jump_pressed = (action_int == 1) and (self._prev_action_int != 1)
         was_on_ground = bool(self._game.player.on_ground)
+        jump_executed = (action_int == 1) and was_on_ground
         nearest_obstacle_distance = self._nearest_obstacle_distance_px()
 
         # Action repeat to match your existing trainer behavior.
@@ -254,15 +257,19 @@ class GeometryDashGymEnv(gym.Env):
 
         # Optional reward shaping: survival bonus + anti-spam penalties.
         accumulated_reward += float(self.config.alive_reward)
-        if action_int == 1:
+        # Penalize each actual jump event (on-ground jump), even if action=1 is held.
+        if jump_executed:
             accumulated_reward -= float(self.config.jump_action_penalty)
-            if not was_on_ground:
-                accumulated_reward -= float(self.config.air_jump_penalty)
-            elif (
+            if (
                 nearest_obstacle_distance is None
                 or nearest_obstacle_distance > float(self.config.jump_danger_distance_px)
             ):
                 accumulated_reward -= float(self.config.unnecessary_jump_penalty)
+        # Penalize airborne jump attempts once per button press edge.
+        elif jump_pressed:
+            accumulated_reward -= float(self.config.air_jump_penalty)
+
+        self._prev_action_int = action_int
 
         truncated = self._step_count >= self.config.max_steps_per_episode
         obs = self._current_observation()

@@ -361,7 +361,6 @@ class Game:
         self._telemetry_obs: dict = {}
         self._telemetry_reward: float = 0.0
         self._telemetry_done: bool = False
-        self._last_action: int = 0
         
         # AI Agent state
         self._agent_policy = agent_policy
@@ -415,7 +414,6 @@ class Game:
         self._scroll_x = 0.0
         self._step_n   = 0
         self._next_x   = float(C.SPAWN_X)
-        self._last_action = 0
 
         if self._fixed_level and self._level_dicts:
             self.obstacles = []
@@ -468,7 +466,6 @@ class Game:
         done   : bool    True if the player has died.
         """
         self._step_n += 1
-        self._last_action = action
         
         # Update agent inference info if in AI mode
         if self._agent_policy is not None:
@@ -592,31 +589,27 @@ class Game:
             "player_vy": float(self.player.vy),
             "on_ground": 1.0 if self.player.on_ground else 0.0,
             "obstacles": obs_array,
-            "last_action": float(self._last_action),
         }
 
     def get_normalized_observation(self) -> list[float]:
         """
         Return observation as a normalized list of floats suitable for NN input.
-        Includes: [player_y, player_vy, on_ground, obstacle features..., is_jump_possible, last_action]
-        Total: 3 + (5 obstacles × 8 features) + 1 + 1 = 45 values.
+        Includes: [player_y, player_vy, on_ground, obstacle features..., is_jump_possible]
+        Total: 3 + (3 obstacles × 8 features) + 1 = 28 values.
         All normalized to roughly [0, 1] or [-1, 1].
         """
         obs = self._obs()
         normalized = []
 
         # Player state (normalized)
-        # player_y: [0, GROUND_Y] → [0, 1]
         normalized.append(obs["player_y"] / C.GROUND_Y)
-        
-        # player_vy: [-2000, 2000] → [-1, 1]
         normalized.append(max(-1.0, min(1.0, obs["player_vy"] / C.MAX_FALL_SPEED)))
-        
-        # on_ground: already 0 or 1
         normalized.append(obs["on_ground"])
 
-        # Obstacle features (5 obstacles, 8 features each)
-        MAX_OBSTACLES = 5
+        # Obstacle features (reduced to 3 obstacles, 8 features each)
+        MAX_OBSTACLES = 3
+        VISION_LIMIT_PX = 784.0  # Exactly 7 blocks of vision
+
         raw_upcoming = sorted([o for o in self.obstacles if o.x + o.w >= C.PLAYER_X], key=lambda o: o.x)
         
         # Merge adjacent obstacles of the same type to create macro-obstacles for the MLP
@@ -627,7 +620,6 @@ class Game:
                 continue
             
             last = upcoming[-1]
-            # If same type and touching/overlapping horizontally (with 1px float tolerance)
             if o.kind == last["kind"] and o.x <= last["x"] + last["w"] + 1.0:
                 last["w"] = (o.x + o.w) - last["x"]
                 last["y"] = min(last["y"], o._y)
@@ -638,34 +630,38 @@ class Game:
         for i in range(MAX_OBSTACLES):
             if i < len(upcoming):
                 o = upcoming[i]
-                otype = 0.0 if o["kind"] == "spike" else 1.0
                 rel_x = o["x"] - C.PLAYER_X
+                
+                # --- THE DISTANCE MASK ---
+                if rel_x > VISION_LIMIT_PX:
+                    # Obstacle is outside the 7-block actionable zone; blind the agent to it
+                    normalized.extend([0.0] * 8)
+                    continue
+                # -------------------------
+
+                otype = 0.0 if o["kind"] == "spike" else 1.0
                 rel_y = o["y"] - self.player.y
                 time_to_reach = rel_x / C.GAME_SPEED if C.GAME_SPEED > 0 else 0.0
                 
-                # Gap calculations (simplified)
                 gap_top = max(0.0, o["y"] - (self.player.y + C.PLAYER_SIZE))
                 gap_bot = max(0.0, (self.player.y - C.PLAYER_SIZE) - (o["y"] + o["h"])) if o["kind"] == "block" else 0.0
                 
                 normalized.extend([
-                    otype,                                        # type: 0 or 1
-                    max(0.0, min(1.0, rel_x / C.SCREEN_W)),      # rel_x normalized
-                    max(-1.0, min(1.0, rel_y / C.GROUND_Y)),     # rel_y normalized
-                    o["w"] / C.BLOCK_SIZE / 5.0,                 # width normalized (assume max ~5 blocks)
-                    o["h"] / C.BLOCK_SIZE / 5.0,                 # height normalized
-                    max(0.0, min(1.0, time_to_reach / 6.0)),    # time_to_reach normalized (0-6 seconds)
-                    max(0.0, min(1.0, gap_top / C.GROUND_Y)),    # gap_top normalized
-                    max(0.0, min(1.0, gap_bot / C.GROUND_Y)),    # gap_bot normalized
+                    otype,                                        
+                    max(0.0, min(1.0, rel_x / VISION_LIMIT_PX)), # Normalize against vision limit so it scales 0.0 to 1.0
+                    max(-1.0, min(1.0, rel_y / C.GROUND_Y)),     
+                    o["w"] / C.BLOCK_SIZE / 5.0,                 
+                    o["h"] / C.BLOCK_SIZE / 5.0,                 
+                    max(0.0, min(1.0, time_to_reach / 6.0)),    
+                    max(0.0, min(1.0, gap_top / C.GROUND_Y)),    
+                    max(0.0, min(1.0, gap_bot / C.GROUND_Y)),    
                 ])
             else:
-                # Pad with zeros
+                # Pad with zeros if fewer than 3 obstacles exist
                 normalized.extend([0.0] * 8)
 
         # is_jump_possible_now (same as on_ground)
         normalized.append(obs["on_ground"])
-        
-        # last_action: 0 or 1
-        normalized.append(obs["last_action"])
 
         return normalized
 

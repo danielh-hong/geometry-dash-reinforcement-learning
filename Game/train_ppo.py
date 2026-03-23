@@ -55,10 +55,11 @@ class PpoTrainConfig:
 
     # Environment generation
     difficulty: int = 3
-    level_length: int = 6000
+    level_length: int = 9000
     seed: int = 42
     randomize_level_each_episode: bool = True
     progressive: bool = True
+    staircase_only: bool = False
 
     # Runtime controls
     action_repeat: int = 1
@@ -66,12 +67,11 @@ class PpoTrainConfig:
     num_envs: int = 8
 
     # Optional reward shaping and feature control.
-    alive_reward: float = 0.0  # Survival bonus per RL step
-    jump_action_penalty: float = 0.0
-    air_jump_penalty: float = 1.0
-    unnecessary_jump_penalty: float = 0.5
+    alive_reward: float = 0.001  # Slight survival bonus per RL step
+    jump_action_penalty: float = 0.002
+    air_jump_penalty: float = 0.01
+    unnecessary_jump_penalty: float = 0.03
     jump_danger_distance_px: float = 250.0
-    zero_last_action_feature: bool = True
 
     # PPO hyperparameters (solid starting defaults)
     learning_rate: float = 3e-4
@@ -198,13 +198,13 @@ def _make_env(config: PpoTrainConfig, rank: int):
             seed=config.seed + rank * 10_000,
             randomize_level_each_episode=config.randomize_level_each_episode,
             progressive=config.progressive,
+            staircase_only=config.staircase_only,
             action_repeat=config.action_repeat,
             max_steps_per_episode=config.max_steps_per_episode,
             jump_action_penalty=config.jump_action_penalty,
             air_jump_penalty=config.air_jump_penalty,
             unnecessary_jump_penalty=config.unnecessary_jump_penalty,
             jump_danger_distance_px=config.jump_danger_distance_px,
-            zero_last_action_feature=config.zero_last_action_feature,
             render=False,
         )
         return GeometryDashGymEnv(config=env_cfg)
@@ -248,24 +248,34 @@ def train_ppo(config: PpoTrainConfig) -> tuple[Path, Path, Optional[Path]]:
         }
     }
 
-    model = PPO(
-        policy="MlpPolicy",
-        env=vec_env,
-        learning_rate=config.learning_rate,
-        n_steps=config.n_steps,
-        batch_size=config.batch_size,
-        n_epochs=config.n_epochs,
-        gamma=config.gamma,
-        gae_lambda=config.gae_lambda,
-        clip_range=config.clip_range,
-        ent_coef=config.ent_coef,
-        vf_coef=config.vf_coef,
-        max_grad_norm=config.max_grad_norm,
-        target_kl=config.target_kl,
-        policy_kwargs=policy_kwargs,
-        verbose=1,
-        device=config.device,
-    )
+    if hasattr(config, 'load_model') and config.load_model:
+        print(f"\n[INFO] Continuing training from existing model: {config.load_model}")
+        model = PPO.load(
+            config.load_model, 
+            env=vec_env, 
+            device=config.device,
+            # We explicitly override the learning rate in case you want to lower it in later phases
+            custom_objects={"learning_rate": config.learning_rate} 
+        )
+    else:
+        model = PPO(
+            policy="MlpPolicy",
+            env=vec_env,
+            learning_rate=config.learning_rate,
+            n_steps=config.n_steps,
+            batch_size=config.batch_size,
+            n_epochs=config.n_epochs,
+            gamma=config.gamma,
+            gae_lambda=config.gae_lambda,
+            clip_range=config.clip_range,
+            ent_coef=config.ent_coef,
+            vf_coef=config.vf_coef,
+            max_grad_norm=config.max_grad_norm,
+            target_kl=config.target_kl,
+            policy_kwargs=policy_kwargs,
+            verbose=1,
+            device=config.device,
+        )
 
     csv_logger = CsvEpisodeLoggerCallback(metrics_csv)
     checkpoint_cb = CheckpointCallback(
@@ -289,7 +299,6 @@ def train_ppo(config: PpoTrainConfig) -> tuple[Path, Path, Optional[Path]]:
     print(f"  Air-jump penalty  : {config.air_jump_penalty}")
     print(f"  Unnec. jump pen.  : {config.unnecessary_jump_penalty}")
     print(f"  Danger dist (px)  : {config.jump_danger_distance_px}")
-    print(f"  Zero last_action  : {config.zero_last_action_feature}")
     print(f"  Device            : {config.device}")
     print(f"  Logs              : {log_path}")
     print("=" * 80)
@@ -337,7 +346,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--timesteps", type=int, default=2_000_000, help="Total PPO training timesteps")
     parser.add_argument("--difficulty", type=int, default=3, help="Level difficulty (1-5)")
-    parser.add_argument("--level-length", type=int, default=6000, help="Level length in pixels")
+    parser.add_argument("--level-length", type=int, default=9000, help="Level length in pixels")
     parser.add_argument("--seed", type=int, default=42, help="Base RNG seed")
 
     parser.add_argument("--num-envs", type=int, default=8, help="Number of parallel environments")
@@ -346,25 +355,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--alive-reward",
         type=float,
-        default=0.0,
+        default=0.001,
         help="Bonus per RL step for staying alive (survival encouragement)",
     )
     parser.add_argument(
         "--jump-penalty",
         type=float,
-        default=0.0,
+        default=0.002,
         help="Penalty applied when action=jump each RL step (anti-spam shaping)",
     )
     parser.add_argument(
         "--air-jump-penalty",
         type=float,
-        default=1.0,
+        default=0.01,
         help="Extra penalty when jump is selected while airborne",
     )
     parser.add_argument(
         "--unnecessary-jump-penalty",
         type=float,
-        default=0.5,
+        default=0.03,
         help="Extra penalty for on-ground jumps when nearest obstacle is not imminent",
     )
     parser.add_argument(
@@ -373,13 +382,6 @@ def parse_args() -> argparse.Namespace:
         default=250.0,
         help="Obstacle distance threshold (px) within which a jump is considered necessary",
     )
-    parser.add_argument(
-        "--zero-last-action",
-        action="store_true",
-        default=True,
-        help="Set last_action feature to 0 in PPO observations",
-    )
-
     parser.add_argument("--lr", type=float, default=3e-4, help="PPO learning rate")
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor")
     parser.add_argument("--gae-lambda", type=float, default=0.95, help="GAE lambda")
@@ -399,7 +401,9 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--fixed-level", action="store_true", help="Disable per-episode level randomization")
     parser.add_argument("--progressive", action="store_true", default=True, help="Enable progressive LevelGenerator curriculum")
+    parser.add_argument("--staircase-only", action="store_true", help="Train on staircase patterns only (no spikes/clusters)")
     parser.add_argument("--no-plot", action="store_true", help="Disable plot generation after training")
+    parser.add_argument("--load-model", type=str, default=None, help="Path to an existing .zip model to continue training")
 
     return parser.parse_args()
 
@@ -414,6 +418,7 @@ def main() -> None:
         seed=args.seed,
         randomize_level_each_episode=not args.fixed_level,
         progressive=args.progressive,
+        staircase_only=args.staircase_only,
         action_repeat=args.action_repeat,
         max_steps_per_episode=args.max_steps,
         num_envs=max(1, args.num_envs),
@@ -422,7 +427,6 @@ def main() -> None:
         air_jump_penalty=max(0.0, args.air_jump_penalty),
         unnecessary_jump_penalty=max(0.0, args.unnecessary_jump_penalty),
         jump_danger_distance_px=max(1.0, args.jump_danger_distance),
-        zero_last_action_feature=args.zero_last_action,
         learning_rate=args.lr,
         gamma=args.gamma,
         gae_lambda=args.gae_lambda,
@@ -440,6 +444,7 @@ def main() -> None:
         plot_after_training=not args.no_plot,
         figure_dir=args.figure_dir,
     )
+    cfg.load_model = args.load_model
 
     train_ppo(cfg)
 

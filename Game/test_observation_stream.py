@@ -62,10 +62,8 @@ def test_observation_streaming():
                  "obs0_type", "obs0_relx", "obs0_rely", "obs0_w", "obs0_h", "obs0_time", "obs0_gap_top"][i]
         print(f"  [{i:2d}] {label:15s}: {val:8.4f}")
     
-    print(f"\nLast 2 values (jump_possible, last_action):")
-    for i, val in enumerate(obs_norm[-2:]):
-        label = ["is_jump_possible", "last_action"][i]
-        print(f"  [{len(obs_norm)-2+i:2d}] {label:15s}: {val:8.4f}")
+    print(f"\nLast value (jump_possible):")
+    print(f"  [{len(obs_norm)-1:2d}] {'is_jump_possible':15s}: {obs_norm[-1]:8.4f}")
     
     print("\n" + "=" * 70)
     print("  ✓ Observation streaming test PASSED")
