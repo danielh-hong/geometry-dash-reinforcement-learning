@@ -12,4 +12,5 @@ data/
 // Custom
 logs_*
 *.pt
+!Cv/saved_params/best.pt
 runs/

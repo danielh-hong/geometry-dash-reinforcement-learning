@@ -7,7 +7,7 @@ def main():
     # Use the model
     results = model.train(
         data="data/data.yaml",   # path to dataset YAML
-        epochs=300,             # number of training epochs
+        epochs=500,             # number of training epochs
         patience=50,             # early stopping if no improvement for 50 epochs
         batch=-1,                # AutoBatch: scales to your GPU memory automatically
         imgsz=640,               # training image size
