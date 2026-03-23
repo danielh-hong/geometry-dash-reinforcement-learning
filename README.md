@@ -119,5 +119,3 @@ gd_game/
   constants.py   ← all tunable values
   requirements.txt
 ```
-
-That's it. One game file. Add RL wrapper / YOLO pipeline on top once the game feels right.
