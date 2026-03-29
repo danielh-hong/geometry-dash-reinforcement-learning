@@ -48,6 +48,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42, help="Seed for reproducible level")
     parser.add_argument("--length", type=int, default=9000, help="Level length in pixels")
     parser.add_argument("--staircase-only", action="store_true", help="Use staircase-only generated test level")
+    parser.add_argument("--triple-only", action="store_true", help="Use triple-spike-only generated test level")
+    parser.add_argument("--progressive", action="store_true", help="Enable progressive curriculum (ramps up difficulty)")
     parser.add_argument(
         "--action-repeat",
         type=int,
@@ -96,9 +98,11 @@ def main() -> None:
     level_gen = LevelGenerator(
         difficulty=args.difficulty,
         seed=args.seed,
-        progressive=False,
+        progressive=args.progressive,
     )
-    if args.staircase_only:
+    if args.triple_only:
+        level_obstacles = level_gen.generate_triple_only(length=args.length)
+    elif args.staircase_only:
         level_obstacles = level_gen.generate_staircase_only(length=args.length)
     else:
         level_obstacles = level_gen.generate(length=args.length)
@@ -115,6 +119,7 @@ def main() -> None:
     decision_index = 0
     current_action = 0
     current_probs = np.asarray([0.5, 0.5], dtype=np.float32)
+    total_reward = 0.0
 
     print("=" * 70)
     print("  GEOMETRY DASH RL — PPO Watch Mode")
@@ -173,7 +178,8 @@ def main() -> None:
                 )
 
         # Keep physics integration closer to training by using default fixed dt.
-        _, _, done = game.step(current_action)
+        obs, reward, done = game.step(current_action)
+        total_reward += reward
         game.render()
         frame_index += 1
 
@@ -181,9 +187,10 @@ def main() -> None:
 
         if done:
             attempts += 1
-            print(f"  Attempt {attempts:>3}  |  dist = {int(game._scroll_x):>6} px  |  best = {best_px:>6} px")
+            print(f"  Attempt {attempts:>3}  |  dist = {int(game._scroll_x):>6} px  |  best = {best_px:>6} px  |  total_reward = {total_reward:.2f}")
             pygame.time.wait(300)
             game.load_level(level_obstacles)
+            total_reward = 0.0
             frame_index = 0
             decision_index = 0
             current_action = 0

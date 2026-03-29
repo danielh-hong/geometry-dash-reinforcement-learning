@@ -404,11 +404,18 @@ def chunk_staircase_up(x: float, steps: int = 3) -> tuple[list[dict], float]:
     — wait for your cube to fully land on each platform before jumping."
     """
     objs: list[dict] = []
-    step_w = 3  # columns per step
+    step_w = 3  # width of each step in blocks
     for i in range(steps):
         sx = x + i * step_w * B
-        for col in range(step_w):
-            objs.extend(_block(sx + col * B, stack=i + 1))
+        sy = C.GROUND_Y - (i + 1) * C.BLOCK_H
+        # Each step is a single wide block (3 blocks wide, 1 block tall)
+        objs.append({
+            "type": "block",
+            "x": float(sx),
+            "y": float(sy),
+            "w": float(step_w * C.BLOCK_W),
+            "h": float(C.BLOCK_H),
+        })
     return objs, float(steps * step_w * B)
 
 def chunk_staircase_down(x: float, steps: int = 3) -> tuple[list[dict], float]:
@@ -540,10 +547,23 @@ def chunk_triple_then_single(x: float) -> tuple[list[dict], float]:
 # Each entry: (chunk_function, relative_weight)
 # Higher weight = chosen more often.
 
+
+# --- Custom pool: only single, double, triple spikes, and staircase ---
+# CUSTOM_POOL_TRAIN = [
+#     (chunk_single_spike, 40),
+#     (chunk_double_spike, 30),
+#     (chunk_triple_spike, 20),
+#     (chunk_staircase_up, 10),
+# ]
+#
+# Use this pool for training if needed:
+# POOLS = {i: CUSTOM_POOL_TRAIN for i in range(1, 7)}
+
+# --- Custom pool: four obstacle types for evaluation (no block wall) ---
+# --- Original pools: many different chunk types per difficulty ---
 POOL_1 = [   # Phase 1: Single-spike mastery only
     (chunk_single_spike,          100),
 ]
-
 POOL_2 = [   # Phase 2: More variety, still forgiving
     (chunk_single_spike,           12),
     (chunk_double_spike,           50),
@@ -553,7 +573,6 @@ POOL_2 = [   # Phase 2: More variety, still forgiving
     (chunk_spike_then_platform,     4),
     (chunk_spike_on_block,          4),
 ]
-
 POOL_3 = [   # Phase 3: Verticality + first harder spike motifs
     (chunk_double_spike,           20),
     (chunk_single_block_wall,      15),
@@ -562,7 +581,6 @@ POOL_3 = [   # Phase 3: Verticality + first harder spike motifs
     (chunk_alternating_spikes,     10),
     (chunk_spike_cluster,           5),
 ]
-
 POOL_4 = [   # Phase 4: Combo-heavy with occasional dense spikes
     (chunk_double_spike,           14),
     (chunk_triple_spike,           10),
@@ -573,7 +591,6 @@ POOL_4 = [   # Phase 4: Combo-heavy with occasional dense spikes
     (chunk_platform_with_spike_ends, 10),
     (chunk_spike_cluster,           8),
 ]
-
 POOL_5 = [   # Phase 5: High density with broad pattern coverage
     (chunk_triple_spike,           24),
     (chunk_spike_cluster,          20),
@@ -583,8 +600,49 @@ POOL_5 = [   # Phase 5: High density with broad pattern coverage
     (chunk_alternating_spikes,     10),
     (chunk_platform_with_spike_ends, 6),
 ]
-
 POOLS = {1: POOL_1, 2: POOL_2, 3: POOL_3, 4: POOL_4, 5: POOL_5, 6: POOL_5}  # Cap at Phase 5
+#
+# # Original pools (commented out for now)
+# POOL_1 = [   # Phase 1: Single-spike mastery only
+#     (chunk_single_spike,          100),
+# ]
+# POOL_2 = [   # Phase 2: More variety, still forgiving
+#     (chunk_single_spike,           12),
+#     (chunk_double_spike,           50),
+#     (chunk_single_block_wall,      16),
+#     (chunk_spike_gate,             10),
+#     (chunk_alternating_spikes,      4),
+#     (chunk_spike_then_platform,     4),
+#     (chunk_spike_on_block,          4),
+# ]
+# POOL_3 = [   # Phase 3: Verticality + first harder spike motifs
+#     (chunk_double_spike,           20),
+#     (chunk_single_block_wall,      15),
+#     (chunk_staircase_up,           20),
+#     (chunk_spike_gate,             15),
+#     (chunk_alternating_spikes,     10),
+#     (chunk_spike_cluster,           5),
+# ]
+# POOL_4 = [   # Phase 4: Combo-heavy with occasional dense spikes
+#     (chunk_double_spike,           14),
+#     (chunk_triple_spike,           10),
+#     (chunk_spike_on_block,         14),
+#     (chunk_spike_gate,             18),
+#     (chunk_alternating_spikes,     16),
+#     (chunk_spike_then_platform,    10),
+#     (chunk_platform_with_spike_ends, 10),
+#     (chunk_spike_cluster,           8),
+# ]
+# POOL_5 = [   # Phase 5: High density with broad pattern coverage
+#     (chunk_triple_spike,           24),
+#     (chunk_spike_cluster,          20),
+#     (chunk_triple_then_single,     16),
+#     (chunk_spike_on_block,         12),
+#     (chunk_spike_gate,             12),
+#     (chunk_alternating_spikes,     10),
+#     (chunk_platform_with_spike_ends, 6),
+# ]
+# POOLS = {1: POOL_1, 2: POOL_2, 3: POOL_3, 4: POOL_4, 5: POOL_5, 6: POOL_5}  # Cap at Phase 5
 
 # Gap BETWEEN chunks at each difficulty (Calculated dynamically via actual Game Speed)
 GAPS = {
@@ -629,44 +687,42 @@ class LevelGenerator:
 
     def generate(self, length: int = 6000) -> list[dict]:
         """
-        Generate a level of approximately `length` pixels.
-
-        At 300px/s:
-            3000px  ≈ 10s of gameplay
-            6000px  ≈ 20s (one section of a real GD level)
-            18000px ≈ 60s (full level length)
-
-        Returns
-        -------
-        list[dict] — obstacle dicts sorted by x, ready for Game.load_level()
+        Generate a level of approximately `length` pixels, guaranteeing at least one of each obstacle type from the current pool.
         """
         obstacles: list[dict] = []
         chunks_since_double_spike = 0
 
+        # Get the set of chunk functions for the current pool (for this difficulty)
+        cur_diff = self.difficulty
+        pool = POOLS[cur_diff]
+        chunk_fns_in_pool = set(fn for fn, _ in pool)
+        used_chunk_fns = set()
+
         # Start well past the right edge so first obstacle scrolls in naturally.
-        # 1.5s of run-up at 300px/s = 450px buffer.
         x = float(C.SCREEN_W + C.GAME_SPEED * 1.5)
 
         while x < length + C.SCREEN_W:
-            # Determine current difficulty
+            # Determine current difficulty (progressive curriculum)
             if self.progressive:
                 progress = min((x - C.SCREEN_W) / length, 1.0)
-                ramp     = min(progress / 0.7, 1.0)      # ramp over first 70%
+                ramp     = min(progress / 0.7, 1.0)
                 cur_diff = max(1, round(1 + ramp * (self.difficulty - 1)))
+                pool = POOLS[cur_diff]
+                chunk_fns_in_pool = set(fn for fn, _ in pool)
             else:
                 cur_diff = self.difficulty
 
-            # Pick and place a chunk.
-            # Difficulty-2 anti-starvation rule: if we go too long without a
-            # double spike, force one so training consistently sees this case.
+            # Difficulty-2 anti-starvation rule: if we go too long without a double spike, force one
             if cur_diff == 2 and chunks_since_double_spike >= 3:
                 chunk_fn = chunk_double_spike
             else:
-                chunk_fn = self._weighted_choice(POOLS[cur_diff])
+                chunk_fn = self._weighted_choice(pool)
 
             chunk_objs, width = chunk_fn(x)
             obstacles.extend(chunk_objs)
             x += width
+
+            used_chunk_fns.add(chunk_fn)
 
             if chunk_fn is chunk_double_spike:
                 chunks_since_double_spike = 0
@@ -677,6 +733,48 @@ class LevelGenerator:
 
             # Add gap before next chunk
             gap_min, gap_max = GAPS[cur_diff]
+            x += self._rng.randint(gap_min, gap_max)
+
+        # Guarantee at least one of each chunk type in the pool
+        missing_fns = chunk_fns_in_pool - used_chunk_fns
+        for fn in missing_fns:
+            # Insert the missing chunk at a random position near the end
+            insert_x = x + self._rng.randint(0, int(0.2 * length))
+            chunk_objs, width = fn(insert_x)
+            obstacles.extend(chunk_objs)
+            x = insert_x + width
+
+        obstacles.sort(key=lambda o: o["x"])
+        return obstacles
+
+    def generate_triple_only(self, length: int = 9000) -> list[dict]:
+        """
+        Special training mode: only triple-spike patterns.
+
+        Repeats `chunk_triple_spike` with randomized gaps so the agent sees
+        many triple-spike encounters while still getting varied jump timing.
+
+        Parameters
+        ----------
+        length : int
+            Level length in pixels (~9000px ≈ 30s at normal speed).
+
+        Returns
+        -------
+        list[dict] — obstacle dicts (triple spikes only)
+        """
+        obstacles: list[dict] = []
+
+        # Start offscreen so first obstacle scrolls in naturally.
+        x = float(C.SCREEN_W + C.GAME_SPEED * 1.5)
+
+        # Use gap range from GAPS for current difficulty
+        gap_min, gap_max = GAPS[self.difficulty]
+
+        while x < length + C.SCREEN_W:
+            chunk_objs, width = chunk_triple_spike(x)
+            obstacles.extend(chunk_objs)
+            x += width
             x += self._rng.randint(gap_min, gap_max)
 
         obstacles.sort(key=lambda o: o["x"])
@@ -738,9 +836,6 @@ class LevelGenerator:
             cumulative += w
             if r <= cumulative:
                 return fn
-        return fns[-1]
-
-
 # =============================================================================
 # Preview entry point
 # =============================================================================

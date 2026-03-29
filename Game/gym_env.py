@@ -76,8 +76,9 @@ class GdEnvConfig:
     # LevelGenerator progressive mode (curriculum inside each generated level).
     progressive: bool = False
 
-    # Special training mode: only staircases, no spikes/clusters (for staircase mastery).
-    staircase_only: bool = False
+    # Special training modes
+    staircase_only: bool = False  # Only staircases, no spikes/clusters (for staircase mastery)
+    triple_only: bool = False     # Only triple spikes, for focused triple-spike training
 
     # Environment runtime limits.
     action_repeat: int = 1
@@ -89,13 +90,61 @@ class GdEnvConfig:
     jump_action_penalty: float = 0.0
     air_jump_penalty: float = 0.0
     unnecessary_jump_penalty: float = 0.0
-    jump_danger_distance_px: float = 140.0
+    jump_danger_distance_px: float = 50.0
+    # dangerous_jump_penalty removed
 
     # Rendering is generally False for training speed, True for debugging.
     render: bool = False
 
 
 class GeometryDashGymEnv(gym.Env):
+    def _is_on_top_of_stairs_no_further_up(self) -> bool:
+        """Detect if player is on the highest stair step (no further steps above)."""
+        player = self._game.player
+        player_x = player.x
+        player_w = getattr(player, 'hitbox', None).width if hasattr(player, 'hitbox') else 112  # Default to 1 block
+        player_y = player.y
+        player_bottom = player_y + player_w  # y increases downward
+        print(f"[DEBUG][stairs] Checking: player_x={player_x}, player_y={player_y}, player_w={player_w}, player_bottom={player_bottom}")
+
+        # Find all blocks that horizontally overlap with the player
+        blocks_under = [
+            obs for obs in self._game.obstacles
+            if getattr(obs, 'kind', None) == 'block'
+            and (player_x + player_w > obs.x)
+            and (player_x < obs.x + obs.w)
+        ]
+        if not blocks_under:
+            print(f"[DEBUG][stairs] No blocks under player.")
+            return False
+
+        # Find the block directly under the player's feet (closest to player_bottom, but not above it)
+        blocks_below = [b for b in blocks_under if b._y >= player_bottom - 8]
+        if not blocks_below:
+            print(f"[DEBUG][stairs] No blocks directly under player's feet.")
+            return False
+        top_block = min(blocks_below, key=lambda b: b._y)
+        y_diff = abs(player_bottom - top_block._y)
+        print(f"[DEBUG][stairs] Top block y={top_block._y}, y_diff={y_diff}")
+        if y_diff > 8:
+            print(f"[DEBUG][stairs] Player not close enough to top block (y_diff={y_diff}).")
+            return False
+
+        # Check if there is any block above this one (same x overlap, smaller y)
+        blocks_above = [
+            obs for obs in self._game.obstacles
+            if getattr(obs, 'kind', None) == 'block'
+            and (player_x + player_w > obs.x)
+            and (player_x < obs.x + obs.w)
+            and obs._y < top_block._y - 2
+        ]
+        if blocks_above:
+            print(f"[DEBUG][stairs] There are further stairs above (blocks_above count: {len(blocks_above)}).")
+            return False
+        print(f"[DEBUG][stairs] Player is on top of stairs with no further up.")
+        return True
+
+    # _is_on_top_of_stairs_and_spike_ahead removed
     """
     Gymnasium-compatible environment for Geometry Dash.
 
@@ -160,10 +209,18 @@ class GeometryDashGymEnv(gym.Env):
             seed=seed_for_episode,
             progressive=self.config.progressive,
         )
-        if self.config.staircase_only:
-            return level_gen.generate_staircase_only(length=self.config.level_length)
+        if self.config.triple_only:
+            obstacles = level_gen.generate_triple_only(length=self.config.level_length)
+            print(f"[DEBUG] triple_only={self.config.triple_only} | First 5 obstacles: {[o['type'] for o in obstacles[:5]]}")
+            return obstacles
+        elif self.config.staircase_only:
+            obstacles = level_gen.generate_staircase_only(length=self.config.level_length)
+            print(f"[DEBUG] staircase_only={self.config.staircase_only} | First 5 obstacles: {[o['type'] for o in obstacles[:5]]}")
+            return obstacles
         else:
-            return level_gen.generate(length=self.config.level_length)
+            obstacles = level_gen.generate(length=self.config.level_length)
+            print(f"[DEBUG] default level | First 5 obstacles: {[o['type'] for o in obstacles[:5]]}")
+            return obstacles
 
     def _ensure_game_initialized(self) -> None:
         """Create Game instance lazily so reset() can be called repeatedly."""
@@ -234,6 +291,7 @@ class GeometryDashGymEnv(gym.Env):
         """
         Apply action, advance simulation, and return Gymnasium 5-tuple.
         """
+        print(f"[DEBUG][step] Called with action={action}")
         assert self._game is not None, "Environment must be reset() before step()."
 
         self._step_count += 1
@@ -258,16 +316,26 @@ class GeometryDashGymEnv(gym.Env):
         # Optional reward shaping: survival bonus + anti-spam penalties.
         accumulated_reward += float(self.config.alive_reward)
         # Penalize each actual jump event (on-ground jump), even if action=1 is held.
+        on_top_of_stairs = self._is_on_top_of_stairs_no_further_up()
+        # on_top_of_stairs_and_spike logic removed
+        if on_top_of_stairs:
+            print(f"[DEBUG][step] Player is on top of stairs (no further up). jump_executed={jump_executed}, jump_pressed={jump_pressed}, on_top_of_stairs_and_spike={on_top_of_stairs_and_spike}")
         if jump_executed:
+            print(f"[DEBUG][step] Jump executed. Applying jump penalty: {self.config.jump_action_penalty}")
             accumulated_reward -= float(self.config.jump_action_penalty)
-            if (
+            # dangerous jump penalty logic removed
+            elif (
                 nearest_obstacle_distance is None
                 or nearest_obstacle_distance > float(self.config.jump_danger_distance_px)
             ):
+                print(f"[DEBUG][step] Unnecessary jump penalty applied: {self.config.unnecessary_jump_penalty}")
                 accumulated_reward -= float(self.config.unnecessary_jump_penalty)
-        # Penalize airborne jump attempts once per button press edge.
-        elif jump_pressed:
-            accumulated_reward -= float(self.config.air_jump_penalty)
+        else:
+            if on_top_of_stairs_and_spike:
+                print(f"[DEBUG][step] On top of stairs and spike ahead. Action: NO JUMP. No penalty applied.")
+            if jump_pressed:
+                print(f"[DEBUG][step] Air jump penalty applied: {self.config.air_jump_penalty}")
+                accumulated_reward -= float(self.config.air_jump_penalty)
 
         self._prev_action_int = action_int
 

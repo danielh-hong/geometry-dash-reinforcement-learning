@@ -393,7 +393,7 @@ class Game:
         if not pygame.get_init():
             pygame.init()
         pygame.font.init()
-        self.surface = pygame.display.set_mode((C.SCREEN_W, C.SCREEN_H))
+        self.surface = pygame.display.set_mode((C.SCREEN_W, C.SCREEN_H), pygame.FULLSCREEN)
         pygame.display.set_caption(C.WINDOW_TITLE)
         self.clock   = pygame.time.Clock()
         self.font    = pygame.font.SysFont("monospace", 15, bold=True)
@@ -611,14 +611,12 @@ class Game:
         VISION_LIMIT_PX = 784.0  # Exactly 7 blocks of vision
 
         raw_upcoming = sorted([o for o in self.obstacles if o.x + o.w >= C.PLAYER_X], key=lambda o: o.x)
-        
         # Merge adjacent obstacles of the same type to create macro-obstacles for the MLP
         upcoming = []
         for o in raw_upcoming:
             if not upcoming:
                 upcoming.append({"kind": o.kind, "x": o.x, "y": o._y, "w": o.w, "h": o.h})
                 continue
-            
             last = upcoming[-1]
             if o.kind == last["kind"] and o.x <= last["x"] + last["w"] + 1.0:
                 last["w"] = (o.x + o.w) - last["x"]
@@ -631,21 +629,17 @@ class Game:
             if i < len(upcoming):
                 o = upcoming[i]
                 rel_x = o["x"] - C.PLAYER_X
-                
                 # --- THE DISTANCE MASK ---
                 if rel_x > VISION_LIMIT_PX:
                     # Obstacle is outside the 7-block actionable zone; blind the agent to it
                     normalized.extend([0.0] * 8)
                     continue
                 # -------------------------
-
                 otype = 0.0 if o["kind"] == "spike" else 1.0
                 rel_y = o["y"] - self.player.y
                 time_to_reach = rel_x / C.GAME_SPEED if C.GAME_SPEED > 0 else 0.0
-                
                 gap_top = max(0.0, o["y"] - (self.player.y + C.PLAYER_SIZE))
                 gap_bot = max(0.0, (self.player.y - C.PLAYER_SIZE) - (o["y"] + o["h"])) if o["kind"] == "block" else 0.0
-                
                 normalized.extend([
                     otype,                                        
                     max(0.0, min(1.0, rel_x / VISION_LIMIT_PX)), # Normalize against vision limit so it scales 0.0 to 1.0
@@ -875,7 +869,11 @@ def main() -> None:
         help="Level length in pixels when using --difficulty (default: 6000px ≈ 20 seconds)"
     )
     parser.add_argument("--telemetry", action="store_true", help="Start with in-game telemetry panel enabled")
-    
+    parser.add_argument(
+        "--triple-only",
+        action="store_true",
+        help="Generate a level with only triple-spike obstacles (for human or agent play)"
+    )
     # ── AI Agent Mode ─────────────────────────────────────────────────────────
     # These flags control INFERENCE (watching trained agent), NOT training.
     # Training is done with train.py, this just loads weights and watches.
@@ -932,9 +930,18 @@ def main() -> None:
         print(f"Agent mode: Using difficulty {args.difficulty}, seed={args.seed}")
         print(f"  (Same obstacles every attempt so you can see if agent improves)\n")
     
-    # Generate level using LevelGenerator if difficulty specified
+    # Generate level using LevelGenerator if difficulty specified or triple-only is set
     level_obstacles = None
-    if args.difficulty is not None:
+    if args.triple_only:
+        print(f"Generating TRIPLE-SPIKE-ONLY level: difficulty={args.difficulty or 1}, seed={args.seed}, length={args.length}px")
+        level_gen = LevelGenerator(
+            difficulty=args.difficulty or 1,
+            seed=args.seed,
+            progressive=False
+        )
+        level_obstacles = level_gen.generate_triple_only(length=args.length)
+        print(f"  Generated {len(level_obstacles)} triple spikes\n")
+    elif args.difficulty is not None:
         print(f"Generating level: difficulty={args.difficulty}, seed={args.seed}, length={args.length}px")
         level_gen = LevelGenerator(
             difficulty=args.difficulty,

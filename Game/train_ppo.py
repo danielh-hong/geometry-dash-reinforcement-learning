@@ -43,7 +43,75 @@ from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecMoni
 from gym_env import GeometryDashGymEnv, GdEnvConfig
 from training_plots import generate_training_plots
 
+import threading
+import time
+class VisualEvalCallback(BaseCallback):
+    """
+    Periodically runs the current policy visually on the current training seed/level.
+    """
+    def __init__(self, eval_env_config: GdEnvConfig, eval_interval: int = 50000, max_steps: int = 1000):
+        super().__init__()
+        self.eval_env_config = eval_env_config
+        self.eval_interval = eval_interval
+        self.max_steps = max_steps
+        self.last_eval = 0
 
+    def _on_step(self) -> bool:
+        if self.num_timesteps - self.last_eval >= self.eval_interval:
+            self.last_eval = self.num_timesteps
+            # threading.Thread(target=self.run_visual_eval, daemon=True).start()
+            self.run_visual_eval()  # <-- Run directly on main thread
+        return True
+
+    def run_visual_eval(self):
+        import pygame
+        from game import Game
+        from stable_baselines3 import PPO
+        # Use the current seed and config
+        env_cfg = self.eval_env_config
+        # Use the current model weights
+        model = self.model
+        # Build the level
+        from level_generator import LevelGenerator
+        level_gen = LevelGenerator(
+            difficulty=env_cfg.difficulty,
+            seed=env_cfg.seed,
+            progressive=env_cfg.progressive,
+        )
+        if env_cfg.triple_only:
+            level_obstacles = level_gen.generate_triple_only(length=env_cfg.level_length)
+            print(f"[DEBUG][VisualEval] triple_only={env_cfg.triple_only} | First 5 obstacles: {[o['type'] for o in level_obstacles[:5]]}")
+        elif env_cfg.staircase_only:
+            level_obstacles = level_gen.generate_staircase_only(length=env_cfg.level_length)
+            print(f"[DEBUG][VisualEval] staircase_only={env_cfg.staircase_only} | First 5 obstacles: {[o['type'] for o in level_obstacles[:5]]}")
+        else:
+            level_obstacles = level_gen.generate(length=env_cfg.level_length)
+            print(f"[DEBUG][VisualEval] default level | First 5 obstacles: {[o['type'] for o in level_obstacles[:5]]}")
+        game = Game(render=True, seed=env_cfg.seed, debug=False, agent_policy=None)
+        game.load_level(level_obstacles)
+        obs = game.get_normalized_observation()
+        done = False
+        steps = 0
+        while not done and steps < self.max_steps:
+            # If obs is a dict, flatten to array (should not happen with get_normalized_observation, but safe)
+            if isinstance(obs, dict):
+                # Try to use get_normalized_observation if available
+                if hasattr(game, 'get_normalized_observation'):
+                    obs_input = np.asarray(game.get_normalized_observation(), dtype=np.float32)
+                else:
+                    # Fallback: flatten dict values (not expected)
+                    obs_input = np.asarray(list(obs.values()), dtype=np.float32)
+            else:
+                obs_input = np.asarray(obs, dtype=np.float32)
+            action, _ = model.predict(obs_input, deterministic=True)
+            obs, reward, done = game.step(action)
+            # After step, if obs is dict, get normalized again
+            if isinstance(obs, dict) and hasattr(game, 'get_normalized_observation'):
+                obs = game.get_normalized_observation()
+            game.render()
+            steps += 1
+            time.sleep(1.0 / 60.0)
+        game.close()
 # -----------------------------------------------------------------------------
 # Config
 # -----------------------------------------------------------------------------
@@ -60,6 +128,7 @@ class PpoTrainConfig:
     randomize_level_each_episode: bool = True
     progressive: bool = True
     staircase_only: bool = False
+    triple_only: bool = False
 
     # Runtime controls
     action_repeat: int = 1
@@ -72,6 +141,7 @@ class PpoTrainConfig:
     air_jump_penalty: float = 0.01
     unnecessary_jump_penalty: float = 0.03
     jump_danger_distance_px: float = 250.0
+    # dangerous_jump_penalty removed
 
     # PPO hyperparameters (solid starting defaults)
     learning_rate: float = 3e-4
@@ -131,6 +201,7 @@ class CsvEpisodeLoggerCallback(BaseCallback):
                 "timesteps",
                 "fps",
                 "timestamp",
+                "seed",
             ])
 
     def _on_step(self) -> bool:
@@ -148,25 +219,37 @@ class CsvEpisodeLoggerCallback(BaseCallback):
 
             # Handle multiple possible info layouts used by VecEnv/Gymnasium.
             candidate_episode_infos = []
+            episode_seed = None
 
             episode_info = info.get("episode")
             if isinstance(episode_info, dict):
                 candidate_episode_infos.append(episode_info)
+            # Try to get the seed from info (Gymnasium envs pass it in info)
+            if "seed" in info:
+                episode_seed = info["seed"]
 
             final_info = info.get("final_info")
             if isinstance(final_info, dict):
                 nested_episode = final_info.get("episode")
                 if isinstance(nested_episode, dict):
                     candidate_episode_infos.append(nested_episode)
+                if "seed" in final_info:
+                    episode_seed = final_info["seed"]
             elif isinstance(final_info, (list, tuple)):
                 for nested in final_info:
                     if isinstance(nested, dict):
                         nested_episode = nested.get("episode")
                         if isinstance(nested_episode, dict):
                             candidate_episode_infos.append(nested_episode)
+                        if "seed" in nested:
+                            episode_seed = nested["seed"]
 
             for episode_info in candidate_episode_infos:
                 self._episode_counter += 1
+                # Try to get the seed from episode_info if not found yet
+                seed_val = episode_seed
+                if seed_val is None and "seed" in episode_info:
+                    seed_val = episode_info["seed"]
                 rows.append([
                     self._episode_counter,
                     f"{float(episode_info.get('r', np.nan)):.6f}",
@@ -174,6 +257,7 @@ class CsvEpisodeLoggerCallback(BaseCallback):
                     self.num_timesteps,
                     int(self.model.logger.name_to_value.get("time/fps", 0)),
                     datetime.now().isoformat(),
+                    seed_val if seed_val is not None else "",
                 ])
 
         if rows:
@@ -199,6 +283,7 @@ def _make_env(config: PpoTrainConfig, rank: int):
             randomize_level_each_episode=config.randomize_level_each_episode,
             progressive=config.progressive,
             staircase_only=config.staircase_only,
+            triple_only=config.triple_only,
             action_repeat=config.action_repeat,
             max_steps_per_episode=config.max_steps_per_episode,
             jump_action_penalty=config.jump_action_penalty,
@@ -207,6 +292,7 @@ def _make_env(config: PpoTrainConfig, rank: int):
             jump_danger_distance_px=config.jump_danger_distance_px,
             render=False,
         )
+        print(f"[DEBUG][_make_env] rank={rank} triple_only={env_cfg.triple_only}")
         return GeometryDashGymEnv(config=env_cfg)
 
     return _init
@@ -285,6 +371,7 @@ def train_ppo(config: PpoTrainConfig) -> tuple[Path, Path, Optional[Path]]:
         save_replay_buffer=False,
         save_vecnormalize=False,
     )
+    # Visual evaluation callback: use the same config as training, but only one env
 
     print("=" * 80)
     print("  GEOMETRY DASH RL — PPO Training (Stable-Baselines3)")
@@ -301,6 +388,7 @@ def train_ppo(config: PpoTrainConfig) -> tuple[Path, Path, Optional[Path]]:
     print(f"  Danger dist (px)  : {config.jump_danger_distance_px}")
     print(f"  Device            : {config.device}")
     print(f"  Logs              : {log_path}")
+    # dangerous jump penalty print removed
     print("=" * 80)
 
     model.learn(
@@ -402,8 +490,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fixed-level", action="store_true", help="Disable per-episode level randomization")
     parser.add_argument("--progressive", action="store_true", default=True, help="Enable progressive LevelGenerator curriculum")
     parser.add_argument("--staircase-only", action="store_true", help="Train on staircase patterns only (no spikes/clusters)")
+    parser.add_argument("--triple-only", action="store_true", help="Train on triple spikes only (no other obstacles)")
     parser.add_argument("--no-plot", action="store_true", help="Disable plot generation after training")
     parser.add_argument("--load-model", type=str, default=None, help="Path to an existing .zip model to continue training")
+
+    # --dangerous-jump-penalty argument removed
 
     return parser.parse_args()
 
@@ -419,6 +510,7 @@ def main() -> None:
         randomize_level_each_episode=not args.fixed_level,
         progressive=args.progressive,
         staircase_only=args.staircase_only,
+        triple_only=args.triple_only,
         action_repeat=args.action_repeat,
         max_steps_per_episode=args.max_steps,
         num_envs=max(1, args.num_envs),
