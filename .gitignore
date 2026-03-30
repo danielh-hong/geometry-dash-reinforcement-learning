@@ -10,5 +10,6 @@ data/
 // Custom
 *.pt
 runs/
-
+logs/
+logs_ppo
 

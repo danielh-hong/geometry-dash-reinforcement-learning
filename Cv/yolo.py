@@ -8,6 +8,12 @@ Noise reduction:
 Force objects tracked from right edge of screen, see constants for configs and tolerance.
 Force sizing check (Only block2 and spike3 can have dynamic sizes, others must be consistent)
 Immediately pass very high confidence detections as real
+
+notes for report:
+- YOLOv11n trained on ~300 images.
+- 50 hand labeled, rest from model inference with manual correction.
+- Y level cannot be locked due to player y movement shifting entire screen.
+- First was 20 hand labeled, trained and observed where the cv was really bad, then focused on labeling those scenarios to improve it.
 '''
 
 
