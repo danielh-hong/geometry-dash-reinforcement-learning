@@ -25,7 +25,6 @@ if str(GAME_DIR) not in sys.path:
 from Game import constants as C
 from Game.game import Game
 from Game.level_generator import LevelGenerator
-from Game.rl_model import SimplePolicyNetwork
 
 
 @dataclass
@@ -54,6 +53,8 @@ MODE_HELP = {
     "procedural": "Mixed procedural chunks from LevelGenerator (best generalization view).",
     "triple_only": "Only triple-spike style patterns (hard timing specialization).",
     "staircase_only": "Stair-heavy sections to stress vertical platform control.",
+    "rhythm_only": "Timing-heavy rhythm sections (spike gates, alternating spike motifs, limited verticality).",
+    "spike_only": "Spike motifs only, no stairs/blocks; pure jump-timing stress test.",
     "custom_builder": "You choose how many single/double/triple/stair chunks to include.",
 }
 
@@ -62,18 +63,31 @@ MODEL_HELP = {
     "baseline_wait": "Control baseline. Never jumps, useful to show task difficulty.",
     "ppo_general": "Main PPO policy trained on broader procedural distribution.",
     "ppo_triple": "PPO finetuned for triple-spike motifs.",
-    "reinforce_final": "Older REINFORCE policy for historical comparison.",
+    "ppo_saved_1218": "Experimental PPO checkpoint from saved_parameters.",
+    "ppo_saved_1225": "Experimental PPO checkpoint from saved_parameters.",
+    "ppo_saved_1323": "Experimental PPO checkpoint from saved_parameters.",
+    "ppo_saved_9949": "Experimental PPO checkpoint from saved_parameters.",
 }
 
 
 def _model_registry() -> list[ModelEntry]:
-    return [
+    entries = [
         ModelEntry("baseline_fixed", "Baseline: Fixed-Distance Jump", "baseline"),
         ModelEntry("baseline_wait", "Baseline: Never Jump", "baseline"),
         ModelEntry("ppo_general", "PPO General (logs_custom final)", "ppo", GAME_DIR / "logs_custom" / "checkpoints" / "ppo_policy_final.zip"),
         ModelEntry("ppo_triple", "PPO Triple Finetune (final)", "ppo", GAME_DIR / "logs_triple_finetune" / "checkpoints" / "ppo_policy_final.zip"),
-        ModelEntry("reinforce_final", "REINFORCE Final (policy_final.pth)", "reinforce", GAME_DIR / "logs" / "checkpoints" / "policy_final.pth"),
     ]
+
+    # Optional experimental checkpoints (only shown if present on disk).
+    optional_models = [
+        ModelEntry("ppo_saved_1218", "PPO Experimental A (2026-03-19)", "ppo", GAME_DIR / "saved_parameters" / "2026_03_22_12_18_PPO.zip"),
+        ModelEntry("ppo_saved_1225", "PPO Experimental B (2026-03-20)", "ppo", GAME_DIR / "saved_parameters" / "2026_03_22_12_25_PPO.zip"),
+        ModelEntry("ppo_saved_1323", "PPO Experimental C (2026-03-21)", "ppo", GAME_DIR / "saved_parameters" / "2026_03_22_13_23_PPO.zip"),
+        ModelEntry("ppo_saved_9949", "PPO Experimental D (2026-03-22)", "ppo", GAME_DIR / "saved_parameters" / "2026_03_22_99_49_PPO.zip"),
+    ]
+
+    entries.extend([entry for entry in optional_models if entry.path is not None and entry.path.exists()])
+    return entries
 
 
 def _inject_styles() -> None:
@@ -179,13 +193,6 @@ def _load_ppo_model(model_path: str):
     return PPO.load(model_path, device="cpu")
 
 
-@st.cache_resource(show_spinner=False)
-def _load_reinforce_model(model_path: str):
-    model = SimplePolicyNetwork(device="cpu")
-    model.load(model_path)
-    return model
-
-
 def _adapt_obs_for_ppo(model, obs_norm):
     expected_shape = getattr(model.observation_space, "shape", None)
     expected_dim = int(expected_shape[0]) if expected_shape else len(obs_norm)
@@ -201,7 +208,6 @@ def _make_policy(entry: ModelEntry, threshold_px: int) -> Callable[[list[float],
         if entry.key == "baseline_wait":
             return lambda obs_norm, state: 0
 
-        # Feature index 4 stores nearest obstacle rel_x normalized by VISION_LIMIT=784.
         def baseline_fixed(obs_norm: list[float], _state: dict) -> int:
             rel_x_norm = obs_norm[4] if len(obs_norm) > 4 else 1.0
             rel_x_px = rel_x_norm * 784.0
@@ -221,14 +227,6 @@ def _make_policy(entry: ModelEntry, threshold_px: int) -> Callable[[list[float],
             return int(action)
 
         return ppo_policy
-
-    if entry.kind == "reinforce":
-        model = _load_reinforce_model(str(entry.path))
-
-        def reinforce_policy(obs_norm: list[float], _state: dict) -> int:
-            return int(model.predict(obs_norm))
-
-        return reinforce_policy
 
     raise ValueError(f"Unknown model kind: {entry.kind}")
 
@@ -307,14 +305,18 @@ def _build_level(cfg: RunConfig) -> list[dict]:
         return gen.generate_triple_only(length=cfg.level_length)
     if cfg.mode == "staircase_only":
         return gen.generate_staircase_only(length=cfg.level_length)
+    if cfg.mode == "rhythm_only":
+        return gen.generate_rhythm_only(length=cfg.level_length)
+    if cfg.mode == "spike_only":
+        return gen.generate_spike_only(length=cfg.level_length)
     if cfg.mode == "custom_builder":
         return _build_custom_obstacles(cfg)
     return gen.generate(length=cfg.level_length)
 
 
-def _run_episode(entry: ModelEntry, cfg: RunConfig) -> dict:
+def _run_episode(entry: ModelEntry, cfg: RunConfig, prebuilt_obstacles: list[dict] | None = None) -> dict:
     policy = _make_policy(entry, cfg.threshold_px)
-    obstacles = _build_level(cfg)
+    obstacles = prebuilt_obstacles if prebuilt_obstacles is not None else _build_level(cfg)
 
     game = Game(render=False, seed=cfg.seed, debug=False, agent_policy=None)
     game.load_level(obstacles)
@@ -413,23 +415,25 @@ def _run_visual_episode(
     render_scale: float,
     sim_steps_per_frame: int,
     render_every_n: int,
-):
+    show_visual_feedback: bool,
+) -> dict:
     policy = _make_policy(entry, cfg.threshold_px)
     obstacles = _build_level(cfg)
 
     game = Game(render=False, seed=cfg.seed, debug=False, agent_policy=None)
     game.load_level(obstacles)
 
-    frame_slot = st.empty()
-    stats_slot = st.empty()
-    progress = st.progress(0)
+    frame_slot = st.empty() if show_visual_feedback else None
+    stats_slot = st.empty() if show_visual_feedback else None
+    progress = st.progress(0) if show_visual_feedback else None
     done = False
     total_reward = 0.0
     steps = 0
     visual_ticks = 0
     last_action = 0
 
-    target_steps = min(cfg.max_steps, max_visual_steps)
+    # Watch mode has its own dedicated step cap independent from compare mode.
+    target_steps = max_visual_steps
     while not done and steps < target_steps:
         for _ in range(max(1, sim_steps_per_frame)):
             if done or steps >= target_steps:
@@ -442,7 +446,7 @@ def _run_visual_episode(
             steps += 1
 
         visual_ticks += 1
-        if visual_ticks % max(1, render_every_n) == 0 or done or steps >= target_steps:
+        if show_visual_feedback and (visual_ticks % max(1, render_every_n) == 0 or done or steps >= target_steps):
             frame = _render_frame(game, scale=render_scale)
             frame_slot.image(
                 frame,
@@ -460,12 +464,21 @@ def _run_visual_episode(
                 }
             )
 
-        progress.progress(min(100, int((steps / max(1, target_steps)) * 100)))
+        if show_visual_feedback:
+            progress.progress(min(100, int((steps / max(1, target_steps)) * 100)))
 
-        if fps > 0:
+        if show_visual_feedback and fps > 0:
             time.sleep(1.0 / float(fps))
 
+    final = {
+        "model": entry.label,
+        "distance_px": int(game._scroll_x),
+        "steps": steps,
+        "reward": round(total_reward, 3),
+        "done": done,
+    }
     game.close()
+    return final
 
 
 def _sidebar_controls() -> tuple[list[ModelEntry], RunConfig]:
@@ -473,22 +486,17 @@ def _sidebar_controls() -> tuple[list[ModelEntry], RunConfig]:
     st.sidebar.caption("These options control WHAT and HOW the game is played")
 
     registry = _model_registry()
-    label_to_entry = {m.label: m for m in registry}
+    selected_entries = list(registry)
 
-    default_labels = [registry[0].label, registry[2].label]
-    selected_labels = st.sidebar.multiselect(
-        "🤖 Models to compare",
-        options=[m.label for m in registry],
-        default=default_labels,
-        help="Select which AI policies to run side-by-side. Compare their distance, reward, and behavior.",
-    )
+    st.sidebar.markdown("### 🤖 Model Set")
+    st.sidebar.caption(f"All available models are auto-included ({len(selected_entries)} total).")
 
     st.sidebar.divider()
     st.sidebar.markdown("### Level Design")
 
     mode = st.sidebar.selectbox(
         "Obstacle pattern",
-        options=["procedural", "triple_only", "staircase_only", "custom_builder"],
+        options=["procedural", "triple_only", "staircase_only", "rhythm_only", "spike_only", "custom_builder"],
         index=0,
         help="**procedural**: Mixed obstacles (best for general testing) | **triple_only**: Only hard triple-spike patterns | **staircase_only**: Only vertical platforms | **custom_builder**: You control obstacle counts.",
     )
@@ -531,10 +539,10 @@ def _sidebar_controls() -> tuple[list[ModelEntry], RunConfig]:
     threshold_px = st.sidebar.slider(
         "Baseline jump distance (px)",
         min_value=80,
-        max_value=400,
+        max_value=450,
         value=220,
         step=10,
-        help="For baseline models: jump when nearest obstacle is WITHIN this distance. Test different strategies.",
+        help="Used by Baseline: Fixed-Distance Jump. Increase = jumps earlier, decrease = jumps later.",
     )
 
     count_single = 10
@@ -564,7 +572,6 @@ def _sidebar_controls() -> tuple[list[ModelEntry], RunConfig]:
         count_staircase=int(count_staircase),
     )
 
-    selected_entries = [label_to_entry[label] for label in selected_labels]
     return selected_entries, cfg
 
 
@@ -579,17 +586,55 @@ def main() -> None:
         st.warning("Select at least one model to run.")
         return
 
+    all_labels = [entry.label for entry in selected_entries]
+    ppo_general_label = next((label for label in all_labels if "PPO General" in label), None)
+    baseline_label = next((label for label in all_labels if "Baseline: Fixed-Distance Jump" in label), None)
+
+    compare_default_labels: list[str] = []
+    if ppo_general_label is not None:
+        compare_default_labels.append(ppo_general_label)
+    if baseline_label is not None:
+        compare_default_labels.append(baseline_label)
+    if not compare_default_labels:
+        compare_default_labels = all_labels[: min(2, len(all_labels))]
+
+    watch_default_index = all_labels.index(ppo_general_label) if ppo_general_label in all_labels else 0
+
     watch_tab, run_tab = st.tabs(["Watch Live Playback", "Compare Models"])
 
     with run_tab:
+        compare_labels = st.multiselect(
+            "Models for this comparison",
+            options=all_labels,
+            default=compare_default_labels,
+            help="Pick the PPO models you want in this specific comparison run.",
+        )
+        compare_entries = [entry for entry in selected_entries if entry.label in compare_labels]
+
         if st.button("Run Episode Comparison", type="primary"):
+            if not compare_entries:
+                st.warning("Select at least one model in 'Models for this comparison'.")
+                return
+
             rows = []
             errors = []
-            for entry in selected_entries:
-                try:
-                    rows.append(_run_episode(entry, cfg))
-                except Exception as exc:
-                    errors.append(f"{entry.label}: {exc}")
+            compare_progress = st.progress(0)
+            compare_status = st.empty()
+            with st.spinner("Running selected models..."):
+                # Build one deterministic level and reuse it across models for fair,
+                # faster comparisons.
+                shared_obstacles = _build_level(cfg)
+                total_models = max(1, len(compare_entries))
+                for idx, entry in enumerate(compare_entries, start=1):
+                    compare_status.caption(f"Running {entry.label} ({idx}/{total_models})")
+                    try:
+                        rows.append(_run_episode(entry, cfg, prebuilt_obstacles=shared_obstacles))
+                    except Exception as exc:
+                        errors.append(f"{entry.label}: {exc}")
+                    compare_progress.progress(int((idx / total_models) * 100))
+
+            compare_status.empty()
+            compare_progress.empty()
 
             if rows:
                 df = pd.DataFrame(rows).sort_values(by="DistancePx", ascending=False)
@@ -631,12 +676,18 @@ def main() -> None:
 
         visual_label = st.selectbox(
             "🎮 Model to watch",
-            options=[entry.label for entry in selected_entries],
-            index=0,
+            options=all_labels,
+            index=watch_default_index,
             help="Select which AI to visualize playing the level.",
         )
 
         st.markdown("### Display Speed Controls")
+        show_visual_feedback = st.checkbox(
+            "Show visual feedback (frames + live stats)",
+            value=True,
+            help="Turn this off to run a fast simulation-only watch run without rendering frames.",
+        )
+
         c1, c2, c3 = st.columns(3)
         fps = c1.slider(
             "Playback FPS",
@@ -685,15 +736,22 @@ def main() -> None:
                 if visual_entry is None:
                     st.error(f"Model '{visual_label}' not found. Please reselect from sidebar.")
                 else:
-                    _run_visual_episode(
-                        visual_entry,
-                        cfg,
-                        fps=fps,
-                        max_visual_steps=max_visual_steps,
-                        render_scale=render_scale,
-                        sim_steps_per_frame=sim_steps_per_frame,
-                        render_every_n=render_every_n,
-                    )
+                    with st.spinner(f"Loading {visual_entry.label} and starting playback..."):
+                        final = _run_visual_episode(
+                            visual_entry,
+                            cfg,
+                            fps=fps,
+                            max_visual_steps=max_visual_steps,
+                            render_scale=render_scale,
+                            sim_steps_per_frame=sim_steps_per_frame,
+                            render_every_n=render_every_n,
+                            show_visual_feedback=show_visual_feedback,
+                        )
+                    if not show_visual_feedback:
+                        st.success(
+                            f"Fast run complete: {final['model']} | distance={final['distance_px']} px | "
+                            f"steps={final['steps']} | reward={final['reward']}"
+                        )
             except Exception as exc:
                 st.error(f"Playback error: {exc}")
 
