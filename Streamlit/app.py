@@ -351,7 +351,7 @@ def _run_episode(entry: ModelEntry, cfg: RunConfig, prebuilt_obstacles: list[dic
     }
 
 
-def _render_frame(game: Game, scale: float = 0.35) -> Image.Image:
+def _render_frame(game: Game, scale: float = 0.35, show_hitboxes: bool = False) -> Image.Image:
     width = max(1, int(C.SCREEN_W * scale))
     height = max(1, int(C.SCREEN_H * scale))
     ground_y = int(C.GROUND_Y * scale)
@@ -390,12 +390,54 @@ def _render_frame(game: Game, scale: float = 0.35) -> Image.Image:
         else:
             draw.rectangle([(x1, y1), (x2, y2)], fill=C.BLOCK_COLOR)
 
+        if show_hitboxes:
+            if getattr(obs, "kind", "") == "spike":
+                width_frac = max(0.01, min(1.0, C.SPIKE_HITBOX_WIDTH_FRAC))
+                top_inset_frac = max(0.0, min(1.0, C.SPIKE_HITBOX_TOP_INSET_FRAC))
+                bottom_inset_frac = max(0.0, min(1.0, C.SPIKE_HITBOX_BOTTOM_INSET_FRAC))
+
+                hb_w = max(1.0, obs.w * width_frac)
+                hb_x = obs.x + (obs.w - hb_w) * 0.5
+                inset_top = obs.h * top_inset_frac
+                inset_bottom = obs.h * bottom_inset_frac
+                hb_h = max(1.0, obs.h - inset_top - inset_bottom)
+                hb_y = obs._y + inset_top
+            else:
+                hb_x = obs.x
+                hb_y = obs._y
+                hb_w = obs.w
+                hb_h = obs.h
+
+            draw.rectangle(
+                [
+                    (int(hb_x * scale), int(hb_y * scale)),
+                    (int((hb_x + hb_w) * scale), int((hb_y + hb_h) * scale)),
+                ],
+                outline=(255, 230, 80),
+                width=max(1, int(2 * scale + 1)),
+            )
+
     # Player
     px1 = int(game.player.x * scale)
     py1 = int(game.player.y * scale)
     px2 = int((game.player.x + C.PLAYER_SIZE) * scale)
     py2 = int((game.player.y + C.PLAYER_SIZE) * scale)
     draw.rectangle([(px1, py1), (px2, py2)], fill=C.PLAYER_COLOR)
+
+    if show_hitboxes:
+        m = float(C.HITBOX_MARGIN)
+        phb_x = game.player.x + m
+        phb_y = game.player.y + m
+        phb_w = max(1.0, float(C.PLAYER_SIZE) - 2.0 * m)
+        phb_h = max(1.0, float(C.PLAYER_SIZE) - 2.0 * m)
+        draw.rectangle(
+            [
+                (int(phb_x * scale), int(phb_y * scale)),
+                (int((phb_x + phb_w) * scale), int((phb_y + phb_h) * scale)),
+            ],
+            outline=(255, 255, 0),
+            width=max(1, int(2 * scale + 1)),
+        )
 
     # HUD text with dark background for readability
     hud_text = f"Distance: {int(game._scroll_x)} px"
@@ -416,6 +458,8 @@ def _run_visual_episode(
     sim_steps_per_frame: int,
     render_every_n: int,
     show_visual_feedback: bool,
+    show_telemetry_panel: bool,
+    show_hitboxes: bool,
 ) -> dict:
     policy = _make_policy(entry, cfg.threshold_px)
     obstacles = _build_level(cfg)
@@ -425,6 +469,7 @@ def _run_visual_episode(
 
     frame_slot = st.empty() if show_visual_feedback else None
     stats_slot = st.empty() if show_visual_feedback else None
+    telemetry_slot = st.empty() if (show_visual_feedback and show_telemetry_panel) else None
     progress = st.progress(0) if show_visual_feedback else None
     done = False
     total_reward = 0.0
@@ -447,7 +492,7 @@ def _run_visual_episode(
 
         visual_ticks += 1
         if show_visual_feedback and (visual_ticks % max(1, render_every_n) == 0 or done or steps >= target_steps):
-            frame = _render_frame(game, scale=render_scale)
+            frame = _render_frame(game, scale=render_scale, show_hitboxes=show_hitboxes)
             frame_slot.image(
                 frame,
                 caption=f"{entry.label} | step {steps} | action={'JUMP' if last_action == 1 else 'WAIT'}",
@@ -463,6 +508,30 @@ def _run_visual_episode(
                     "updated_at": datetime.now().strftime("%H:%M:%S"),
                 }
             )
+
+            if telemetry_slot is not None:
+                obs_raw = game._obs()
+                obstacles = obs_raw.get("obstacles", [])
+                has_next = len(obstacles) >= 5 and (obstacles[1] != 0.0 or obstacles[3] != 0.0)
+                next_obstacle = {
+                    "type": ("spike" if obstacles[0] == 0.0 else "block") if has_next else "none",
+                    "x": round(float(obstacles[1]), 1) if has_next else None,
+                    "y": round(float(obstacles[2]), 1) if has_next else None,
+                    "w": round(float(obstacles[3]), 1) if has_next else None,
+                    "h": round(float(obstacles[4]), 1) if has_next else None,
+                }
+                obs_norm = game.get_normalized_observation()
+                telemetry_slot.write(
+                    {
+                        "telemetry": {
+                            "player_y": round(float(obs_raw.get("player_y", 0.0)), 2),
+                            "player_vy": round(float(obs_raw.get("player_vy", 0.0)), 2),
+                            "on_ground": int(obs_raw.get("on_ground", 0.0)),
+                            "next_obstacle": next_obstacle,
+                            "obs_norm_head": [round(float(v), 3) for v in obs_norm[:8]],
+                        }
+                    }
+                )
 
         if show_visual_feedback:
             progress.progress(min(100, int((steps / max(1, target_steps)) * 100)))
@@ -687,6 +756,18 @@ def main() -> None:
             value=True,
             help="Turn this off to run a fast simulation-only watch run without rendering frames.",
         )
+        show_telemetry_panel = st.checkbox(
+            "Show telemetry panel",
+            value=False,
+            help="Displays player state, nearest obstacle, and first normalized features during playback.",
+            disabled=not show_visual_feedback,
+        )
+        show_hitboxes = st.checkbox(
+            "Show collision hitboxes",
+            value=False,
+            help="Overlays player and obstacle collision rectangles used by the physics engine.",
+            disabled=not show_visual_feedback,
+        )
 
         c1, c2, c3 = st.columns(3)
         fps = c1.slider(
@@ -746,6 +827,8 @@ def main() -> None:
                             sim_steps_per_frame=sim_steps_per_frame,
                             render_every_n=render_every_n,
                             show_visual_feedback=show_visual_feedback,
+                            show_telemetry_panel=show_telemetry_panel,
+                            show_hitboxes=show_hitboxes,
                         )
                     if not show_visual_feedback:
                         st.success(
