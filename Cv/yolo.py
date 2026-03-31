@@ -1,235 +1,469 @@
+"""
+yolo.py
+
+Outputs a raw observation vector (28 floats) for RL:
+  - Player: y (top), vy (normalized by GAME_SPEED), on_ground
+  - Up to 5 obstacles: type, x, y, width, height (all raw pixels)
+"""
+
+from __future__ import annotations
+
 import cv2
-import numpy as np
 import mss
+import numpy as np
+import torch
+from dataclasses import dataclass
+from time import perf_counter
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
 from ultralytics import YOLO
 
-'''
-Noise reduction:
-Force objects tracked from right edge of screen, see constants for configs and tolerance.
-Force sizing check (Only block2 and spike3 can have dynamic sizes, others must be consistent)
-Immediately pass very high confidence detections as real
-
-notes for report:
-- YOLOv11n trained on ~300 images.
-- 50 hand labeled, rest from model inference with manual correction.
-- Y level cannot be locked due to player y movement shifting entire screen.
-- First was 20 hand labeled, trained and observed where the cv was really bad, then focused on labeling those scenarios to improve it.
-'''
-
-
-# Check of cuda availability for faster inference
-import torch
+# -----------------------------------------------------------------------------
+# CUDA / device selection
+# -----------------------------------------------------------------------------
 if torch.cuda.is_available():
     print("CUDA is available. Using GPU for inference.")
+    DEVICE = "cuda"
 else:
     print("CUDA is not available. Using CPU for inference.")
+    DEVICE = "cpu"
 
-# Constants based on your game.py / constants.py
+# -----------------------------------------------------------------------------
+# Game / ROI constants
+# -----------------------------------------------------------------------------
 SCREEN_W = 1920
-GROUND_Y = 864
+GROUND_Y = 864          # ground y-coordinate in ROI
 BLOCK_SIZE = 112
-GAME_SPEED = 1163.22
+GAME_SPEED = 1163.22    # pixels per second
 
-# model = YOLO("yolov8m.pt")
-model = YOLO("../runs/detect/train12/weights/best.pt")
-if torch.cuda.is_available():
-    model.to("cuda")
+# Player position in ROI coordinate system (leftmost edge)
+PLAYER_X = 0
+PLAYER_SIZE = BLOCK_SIZE
 
+# Observation‑vector constants
+MAX_OBSTACLES = 5
+VISION_LIMIT_PX = 784.0   # ignore obstacles beyond this distance
+
+# Tracking constants
+MAX_MISSED_FRAMES = 2
+MIN_SEEN_FRAMES = 3
+Y_TOLERANCE = 400
+X_SPEED_TOLERANCE = 150
+RIGHT_EDGE_TOLERANCE = 300
+
+# Class name groups
 SPIKE_NAMES = {"spike", "spike2", "spike3"}
 BLOCK_NAMES = {"block", "block2", "block3"}
 PLAYER_NAMES = {"player"}
 
-sct = mss.mss()
-monitor = sct.monitors[1]
-
-# Adjust to your game lane
+# ROI within the full screenshot
 X0, Y0, X1, Y1 = 758, 55, 2035, 1162
 
-# Tracker state
-tracked_obstacles = []  # List of dicts representing tracked objects
-MAX_MISSED_FRAMES = 2
-MIN_SEEN_FRAMES = 3
-Y_TOLERANCE = 400  # pixels - Increased significantly to allow for player jumping up/down screen levels
-X_SPEED_TOLERANCE = 150  # Max pixels an object can move left in one frame
-RIGHT_EDGE_TOLERANCE = 300 # How close to the right edge (X1-X0) an object must spawn to be considered real
+# -----------------------------------------------------------------------------
+# Data structures
+# -----------------------------------------------------------------------------
+@dataclass
+class Detection:
+    name: str
+    conf: float
+    x1: float
+    y1: float
+    x2: float
+    y2: float
 
-frame_idx = 0
+@dataclass
+class TrackedObstacle:
+    name: str
+    conf: float
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    seen: int = 1
+    missed: int = 0
 
-cv2.namedWindow("Detection", cv2.WINDOW_AUTOSIZE)
-cv2.setWindowProperty("Detection", cv2.WND_PROP_TOPMOST, 1)
+@dataclass
+class ObservationState:
+    prev_player_y: Optional[float] = None   # top y of player
+    prev_time: Optional[float] = None
 
-while True:
-    screenshot = sct.grab(monitor)
-    frame = np.array(screenshot)
-    frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+# -----------------------------------------------------------------------------
+# Utility helpers
+# -----------------------------------------------------------------------------
+def clamp(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, v))
 
-    roi = frame[Y0:Y1, X0:X1]
+def best_detection(detections: Sequence[Detection], name: str) -> Optional[Detection]:
+    best = None
+    for d in detections:
+        if d.name != name:
+            continue
+        if best is None or d.conf > best.conf:
+            best = d
+    return best
 
-    results = model.predict(roi, conf=0.4, imgsz=640, verbose=False, iou=0.3)[0]
+def merge_adjacent_obstacles(obstacles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Optional merging – kept for reference but not used in observation."""
+    obstacles = sorted(obstacles, key=lambda o: o["x"])
+    merged: List[Dict[str, Any]] = []
 
-    detections = []
-    # Filter and extract ONLY the best, most confident player
-    # There should only be one player!
-    raw_player_detections = []
-    
-    for box in results.boxes:
-        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-        cls_id = int(box.cls[0].cpu().numpy())
-        name = model.names[cls_id].lower().strip()
-        conf = float(box.conf[0].cpu().numpy())
-        
-        if name in PLAYER_NAMES:
-            raw_player_detections.append({'box': (x1, y1, x2, y2), 'conf': conf, 'name': name})
-            
-    # Find the single most confident player (if any exist)
-    best_player = None
-    if raw_player_detections:
-        best_player = max(raw_player_detections, key=lambda p: p['conf'])
-        
-    detections = []
-    
-    # Process all boxes again and apply constraints
-    for box in results.boxes:
-        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-        cls_id = int(box.cls[0].cpu().numpy())
-        name = model.names[cls_id].lower().strip()
-        conf = float(box.conf[0].cpu().numpy())
-        
-        # If this is a player but NOT the best player, skip it completely (noise)
-        if name in PLAYER_NAMES:
-            if best_player and (x1, y1, x2, y2) != best_player['box']:
-                continue
-        
-        # --- NOISE FILTER: SIZE CONSTRAINTS ---
-        w = x2 - x1
-        h = y2 - y1
-        MAX_STD_SIZE = BLOCK_SIZE * 1.8  # Allow up to ~200px to account for slight glow/buffer
-        
-        is_valid_size = True
-        if name == "block2":
-            # Dynamic size allowed, but if it covers/overlaps the verified player, it's noise
-            if best_player:
-                px1, py1, px2, py2 = best_player['box']
-                # Check for bounding box intersection
-                if not (x2 < px1 or x1 > px2 or y2 < py1 or y1 > py2):
+    for o in obstacles:
+        if not merged:
+            merged.append(o.copy())
+            continue
+
+        last = merged[-1]
+
+        same_kind = (o["kind"] in SPIKE_NAMES and last["kind"] in SPIKE_NAMES) or \
+                    (o["kind"] in BLOCK_NAMES and last["kind"] in BLOCK_NAMES)
+
+        adjacent = o["x"] <= last["x"] + last["w"] + 1.0
+
+        if same_kind and adjacent:
+            x1 = last["x"]
+            y1 = min(last["y"], o["y"])
+            x2 = max(last["x"] + last["w"], o["x"] + o["w"])
+            y2 = max(last["y"] + last["h"], o["y"] + o["h"])
+            last["x"] = x1
+            last["y"] = y1
+            last["w"] = x2 - x1
+            last["h"] = y2 - y1
+        else:
+            merged.append(o.copy())
+
+    return merged
+
+# -----------------------------------------------------------------------------
+# Main pipeline
+# -----------------------------------------------------------------------------
+class YOLOObservationPipeline:
+    """
+    Stateful pipeline that returns a 28‑float raw observation vector each step.
+    """
+    def __init__(
+        self,
+        model_path: str,
+        conf: float = 0.4,
+        iou: float = 0.3,
+        imgsz: int = 640,
+        device: str = DEVICE,
+    ) -> None:
+        self.model = YOLO(model_path)
+        self.conf = conf
+        self.iou = iou
+        self.imgsz = imgsz
+        self.device = device
+        self.state = ObservationState()
+        self.tracked_obstacles: List[TrackedObstacle] = []
+
+        if self.device == "cuda":
+            self.model.to("cuda")
+
+    def reset(self) -> None:
+        self.state = ObservationState()
+        self.tracked_obstacles = []
+
+    def step(self, roi: np.ndarray, now_t: Optional[float] = None) -> List[float]:
+        """Return the 28‑float raw observation vector for one ROI frame."""
+        _, _, obs = self.step_with_debug(roi, now_t=now_t)
+        return obs
+
+    def step_with_debug(
+        self, roi: np.ndarray, now_t: Optional[float] = None
+    ) -> Tuple[List[Detection], List[TrackedObstacle], List[float]]:
+
+        if now_t is None:
+            now_t = perf_counter()
+
+        results = self.model.predict(
+            roi,
+            conf=self.conf,
+            imgsz=self.imgsz,
+            verbose=False,
+            iou=self.iou,
+        )[0]
+
+        detections = self._parse_detections(results)
+
+        # Best‑player selection
+        raw_player_detections = [d for d in detections if d.name in PLAYER_NAMES]
+        best_player = max(raw_player_detections, key=lambda p: p.conf) if raw_player_detections else None
+
+        filtered_detections: List[Detection] = []
+        for d in detections:
+            if d.name in PLAYER_NAMES:
+                if best_player is not None and (d.x1, d.y1, d.x2, d.y2) != (best_player.x1, best_player.y1, best_player.x2, best_player.y2):
+                    continue
+
+            w = d.x2 - d.x1
+            h = d.y2 - d.y1
+            max_std_size = BLOCK_SIZE * 1.8
+            is_valid_size = True
+
+            if d.name == "block2":
+                if best_player is not None:
+                    px1, py1, px2, py2 = best_player.x1, best_player.y1, best_player.x2, best_player.y2
+                    if not (d.x2 < px1 or d.x1 > px2 or d.y2 < py1 or d.y1 > py2):
+                        is_valid_size = False
+            elif d.name == "spike3":
+                if h > max_std_size:
                     is_valid_size = False
-        elif name == "spike3":
-            if h > MAX_STD_SIZE: is_valid_size = False # Dynamic width allowed, but height must be small
-        elif name == "block3":
-            if w > MAX_STD_SIZE * 1.5 or h > MAX_STD_SIZE * 1.5: is_valid_size = False # Allow block3 to be slightly bigger if they cluster 
+            elif d.name == "block3":
+                if w > max_std_size * 1.5 or h > max_std_size * 1.5:
+                    is_valid_size = False
+            else:
+                if w > max_std_size or h > max_std_size:
+                    is_valid_size = False
+
+            if is_valid_size:
+                filtered_detections.append(d)
+
+        players = [d for d in filtered_detections if d.name in PLAYER_NAMES]
+        current_obstacles = [d for d in filtered_detections if d.name in SPIKE_NAMES or d.name in BLOCK_NAMES]
+
+        current_obstacles.sort(key=lambda d: d.x1)
+        self.tracked_obstacles.sort(key=lambda t: t.x1)
+
+        # Tracking logic – updates tracked obstacles with current detections (no expansion)
+        matched_tracked_indices = set()
+        new_tracked_obstacles: List[TrackedObstacle] = []
+
+        for curr_obs in current_obstacles:
+            best_match_idx = -1
+            best_match_dist = float("inf")
+
+            for i, tracked in enumerate(self.tracked_obstacles):
+                if i in matched_tracked_indices:
+                    continue
+
+                is_same_type = (
+                    (curr_obs.name in SPIKE_NAMES and tracked.name in SPIKE_NAMES)
+                    or (curr_obs.name in BLOCK_NAMES and tracked.name in BLOCK_NAMES)
+                )
+                if not is_same_type:
+                    continue
+
+                if abs(curr_obs.y1 - tracked.y1) > Y_TOLERANCE or abs(curr_obs.y2 - tracked.y2) > Y_TOLERANCE:
+                    continue
+
+                dx = tracked.x1 - curr_obs.x1
+                if -80 <= dx <= X_SPEED_TOLERANCE:
+                    dist = abs(dx)
+                    if dist < best_match_dist:
+                        best_match_dist = dist
+                        best_match_idx = i
+
+            if best_match_idx != -1:
+                t = self.tracked_obstacles[best_match_idx]
+                # Replace tracked coordinates with current detection (no expansion)
+                t.x1 = curr_obs.x1
+                t.y1 = curr_obs.y1
+                t.x2 = curr_obs.x2
+                t.y2 = curr_obs.y2
+                t.conf = curr_obs.conf
+                t.name = curr_obs.name
+                t.seen = max(t.seen + 1, MIN_SEEN_FRAMES if curr_obs.conf > 0.70 else 0)
+                t.missed = 0
+                matched_tracked_indices.add(best_match_idx)
+            else:
+                roi_width = X1 - X0
+                dynamic_edge_tolerance = RIGHT_EDGE_TOLERANCE + (200 if curr_obs.conf > 0.70 else 0)
+
+                if curr_obs.x1 >= (roi_width - dynamic_edge_tolerance):
+                    initial_seen = MIN_SEEN_FRAMES if curr_obs.conf > 0.70 else 1
+                    new_tracked_obstacles.append(
+                        TrackedObstacle(
+                            name=curr_obs.name,
+                            conf=curr_obs.conf,
+                            x1=curr_obs.x1,
+                            y1=curr_obs.y1,
+                            x2=curr_obs.x2,
+                            y2=curr_obs.y2,
+                            seen=initial_seen,
+                            missed=0,
+                        )
+                    )
+
+        for i, tracked in enumerate(self.tracked_obstacles):
+            if i not in matched_tracked_indices:
+                tracked.missed += 1
+
+        self.tracked_obstacles = [t for t in self.tracked_obstacles if t.missed <= MAX_MISSED_FRAMES and t.x2 > -50]
+        self.tracked_obstacles.extend(new_tracked_obstacles)
+
+        verified_obstacles = [t for t in self.tracked_obstacles if t.seen >= MIN_SEEN_FRAMES]
+        verified_obstacles.sort(key=lambda t: t.x1)
+
+        # Build the raw observation vector
+        obs = self._build_observation_vector(players, verified_obstacles, now_t)
+        self.state.prev_time = now_t
+
+        if players:
+            self.state.prev_player_y = players[0].y1
+
+        return players, verified_obstacles, obs
+
+    def _parse_detections(self, results: Any) -> List[Detection]:
+        detections: List[Detection] = []
+        names = results.names
+
+        for box in results.boxes:
+            xyxy = box.xyxy[0].detach().cpu().numpy()
+            x1, y1, x2, y2 = map(float, xyxy)
+            cls_id = int(box.cls.item()) if hasattr(box.cls, "item") else int(box.cls[0].cpu().numpy())
+            name = str(names[cls_id]).lower().strip()
+            conf = float(box.conf.item()) if hasattr(box.conf, "item") else float(box.conf[0].cpu().numpy())
+            detections.append(Detection(name=name, conf=conf, x1=x1, y1=y1, x2=x2, y2=y2))
+
+        return detections
+
+    def _build_observation_vector(
+        self,
+        players: Sequence[Detection],
+        verified_obstacles: Sequence[TrackedObstacle],
+        now_t: float,
+    ) -> List[float]:
+        """
+        Build a raw observation vector of length 28:
+          - 3 player values: y (top), vy (normalized by GAME_SPEED), on_ground
+          - up to MAX_OBSTACLES (5) obstacles, each with 5 raw values: type, x, y, width, height
+        """
+        # ----- Player state -----
+        if players:
+            player = max(players, key=lambda p: p.conf)
+            player_y = float(player.y1)                # top y
+            player_bottom = float(player.y2)
+
+            # Normalized velocity (divide by GAME_SPEED only)
+            if self.state.prev_player_y is not None and self.state.prev_time is not None and now_t > self.state.prev_time:
+                dt = now_t - self.state.prev_time
+                dy = player_y - self.state.prev_player_y
+                raw_vy = dy / dt
+                vy_norm = raw_vy / GAME_SPEED
+                vy_norm = clamp(vy_norm, -1.0, 1.0)
+            else:
+                vy_norm = 0.0
+
+            # On ground check using bottom y
+            on_ground = 1.0 if player_bottom >= (GROUND_Y - 1.0) else 0.0
         else:
-            # Everything else (spike, spike2, block, player) must be relatively small
-            if w > MAX_STD_SIZE or h > MAX_STD_SIZE: is_valid_size = False
-            
-        if is_valid_size:
-            detections.append((name, conf, x1, y1, x2, y2))
+            player_y = 0.0
+            vy_norm = 0.0
+            on_ground = 0.0
 
-    players = [d for d in detections if d[0] in PLAYER_NAMES]
-    current_obstacles = [d for d in detections if d[0] in SPIKE_NAMES or d[0] in BLOCK_NAMES]
-    
-    # Sort current frame detections left-to-right (by x1) to prevent inner-loop merging bugs
-    current_obstacles.sort(key=lambda d: d[2])
-    # Also sort tracked objects left-to-right to ensure spatial matching order
-    tracked_obstacles.sort(key=lambda t: t['x1'])
+        obs = [float(player_y), float(vy_norm), float(on_ground)]
 
-    # --- TRACKING LOGIC ---
-    matched_tracked_indices = set()
-    new_tracked_obstacles = []
-
-    for curr_obs in current_obstacles:
-        name, conf, x1, y1, x2, y2 = curr_obs
-        best_match_idx = -1
-        best_match_dist = float('inf')
-
-        for i, tracked in enumerate(tracked_obstacles):
-            if i in matched_tracked_indices: continue
-            
-            # Constraint 1: Check Type (Spike vs Block)
-            # block3 usually functions as a block, ensure it's categorized effectively
-            is_same_type = (name in SPIKE_NAMES and tracked['name'] in SPIKE_NAMES) or \
-                           (name in BLOCK_NAMES and tracked['name'] in BLOCK_NAMES)
-            if not is_same_type: continue
-            
-            # Constraint 2: Verify Y height/level roughly matches (Increased tolerance for jumping)
-            if abs(y1 - tracked['y1']) > Y_TOLERANCE or abs(y2 - tracked['y2']) > Y_TOLERANCE:
-                continue
-
-            # Constraint 3: Verify X moves generally leftwards
-            dx = tracked['x1'] - x1 
-            
-            # For block3 or fast objects, we sometimes need more generous jitter/forward movement logic 
-            # especially when they are clustered tight together
-            if -80 <= dx <= X_SPEED_TOLERANCE:
-                dist = abs(dx)
-                if dist < best_match_dist:
-                    # Additional check for clustered objects (block3s): 
-                    # Only map if it's the closest spatial matching to avoid consuming neighbours
-                    best_match_dist = dist
-                    best_match_idx = i
-
-        if best_match_idx != -1:
-            # Update the existing object properties
-            t = tracked_obstacles[best_match_idx]
-            t['x1'], t['y1'], t['x2'], t['y2'] = x1, y1, max(x2, t['x2']), y2 # Let x2 expand if offscreen originally
-            t['conf'], t['name'] = conf, name
-            # If highly confident, instantly fully verify it, otherwise increment normally
-            t['seen'] = max(t['seen'] + 1, MIN_SEEN_FRAMES if conf > 0.70 else 0)
-            t['missed'] = 0
-            matched_tracked_indices.add(best_match_idx)
-        else:
-            # Found a completely new object. LEFT edge must originate near the right edge!
-            roi_width = X1 - X0
-            
-            # High confidence objects get a larger relaxed spawn area just in case they enter fast
-            dynamic_edge_tolerance = RIGHT_EDGE_TOLERANCE + (200 if conf > 0.70 else 0)
-            
-            if x1 >= (roi_width - dynamic_edge_tolerance):
-                # If confidence is high, instantly trust it and bypass the 3-frame waiting probation
-                initial_seen = MIN_SEEN_FRAMES if conf > 0.70 else 1
-                new_tracked_obstacles.append({
-                    'name': name, 'conf': conf, 
-                    'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2,
-                    'seen': initial_seen, 'missed': 0
+        # ----- Obstacles (raw, no merging) -----
+        obstacle_dicts = []
+        for o in verified_obstacles:
+            if o.x2 >= PLAYER_X:          # ahead of player
+                if (o.x1 - PLAYER_X) > VISION_LIMIT_PX:
+                    continue
+                obstacle_dicts.append({
+                    "kind": o.name,
+                    "x": o.x1,
+                    "y": o.y1,
+                    "w": o.x2 - o.x1,
+                    "h": o.y2 - o.y1,
                 })
-            # else: Ignore it completely as it spontaneously popped up in the middle of the screen
 
-    # Age objects that dissapeared in this frame
-    for i, tracked in enumerate(tracked_obstacles):
-        if i not in matched_tracked_indices:
-            tracked['missed'] += 1
+        # Sort by x (nearest first)
+        obstacle_dicts.sort(key=lambda o: o["x"])
 
-    # Keep only those that haven't missed too many frames, then add new objects
-    tracked_obstacles = [t for t in tracked_obstacles if t['missed'] <= MAX_MISSED_FRAMES and t['x2'] > -50]
-    tracked_obstacles.extend(new_tracked_obstacles)
+        # Fill up to MAX_OBSTACLES
+        for i in range(MAX_OBSTACLES):
+            if i < len(obstacle_dicts):
+                o = obstacle_dicts[i]
+                otype = 0.0 if o["kind"] in SPIKE_NAMES else 1.0
+                obs.extend([otype, o["x"], o["y"], o["w"], o["h"]])
+            else:
+                obs.extend([0.0, 0.0, 0.0, 0.0, 0.0])
 
-    # --- FILTER TO FINAL LEFTMOST 7 RETAINED OBJECTS ---
-    # Only trust objects that have persisted for at least MIN_SEEN_FRAMES
-    verified_obstacles = [t for t in tracked_obstacles if t['seen'] >= MIN_SEEN_FRAMES]
-    
-    # Sort them primarily by x location (left to right)
-    verified_obstacles.sort(key=lambda t: t['x1'])
-    leftmost_7 = verified_obstacles[:7]
+        # Ensure exactly 28 elements
+        if len(obs) != 28:
+            if len(obs) < 28:
+                obs.extend([0.0] * (28 - len(obs)))
+            else:
+                obs = obs[:28]
+        # make third and last observation 1
+        obs[2], obs[-1] = 1.0, 1.0
 
-    # Print out debug stats to the terminal
-    # print(f"Frame {frame_idx} -> Top 7 objects: {[obj['name'] for obj in leftmost_7]}")
-    frame_idx += 1
+        # make object closer than it seems (to encourage earlier jumps)
+        for i in range(3, len(obs), 5):
+            if obs[i] > 0.0:  # if x > 0 (object present)
+                obs[i] = max(0.0, obs[i] - 60.0)  # reduce x by 60 pixels
+        return obs
 
-    annotated = results.plot(conf=True)
-    
-    # --- VISUALIZE THE 7 TRACKED OBJECTS ---
-    # Draw thick bright yellow boxes and numbers so you can clearly see them in your pop-up window
-    for i, obj in enumerate(leftmost_7):
-        x1, y1, x2, y2 = int(obj['x1']), int(obj['y1']), int(obj['x2']), int(obj['y2'])
-        cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 255), 4) # Yellow thick bounding box
-        cv2.putText(annotated, f"#{i+1}: {obj['name']}", (x1, max(0, y1 - 10)), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 3)
+# -----------------------------------------------------------------------------
+# Demo / standalone capture loop
+# -----------------------------------------------------------------------------
+def run_demo() -> None:
+    model_path = "../runs/detect/train12/weights/best.pt"
+    pipe = YOLOObservationPipeline(model_path)
 
-    # Resize display to half size
-    display_img = cv2.resize(annotated, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
-    cv2.imshow("Detection", display_img)
-    
+    sct = mss.mss()
+    monitor = sct.monitors[1]
 
-    if cv2.waitKey(1) & 0xFF == ord("q"):
-        break
+    cv2.namedWindow("Detection", cv2.WINDOW_AUTOSIZE)
+    cv2.setWindowProperty("Detection", cv2.WND_PROP_TOPMOST, 1)
 
-cv2.destroyAllWindows()
+    frame_idx = 0
+
+    while True:
+        screenshot = sct.grab(monitor)
+        frame = np.array(screenshot)
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+
+        roi = frame[Y0:Y1, X0:X1]
+
+        players, verified_obstacles, obs = pipe.step_with_debug(roi)
+
+        annotated = roi.copy()
+
+        # Draw player if detected
+        if players:
+            player = players[0]
+            px1, py1, px2, py2 = int(player.x1), int(player.y1), int(player.x2), int(player.y2)
+            cv2.rectangle(annotated, (px1, py1), (px2, py2), (0, 255, 0), 4)
+            cv2.putText(annotated, "PLAYER", (px1, max(0, py1 - 10)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 3)
+        else:
+            cv2.putText(annotated, "PLAYER NOT DETECTED", (20, 80),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+
+        # Draw obstacles
+        for i, obj in enumerate(verified_obstacles[:7]):
+            x1, y1, x2, y2 = int(obj.x1), int(obj.y1), int(obj.x2), int(obj.y2)
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 255), 4)
+            cv2.putText(
+                annotated,
+                f"#{i+1}: {obj.name}",
+                (x1, max(0, y1 - 10)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.9,
+                (0, 255, 255),
+                3,
+            )
+
+        cv2.putText(
+            annotated,
+            f"obs_len={len(obs)} frame={frame_idx}",
+            (20, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            (255, 255, 255),
+            2,
+        )
+
+        display_img = cv2.resize(annotated, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
+        cv2.imshow("Detection", display_img)
+
+        frame_idx += 1
+
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            break
+
+    cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    run_demo()

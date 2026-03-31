@@ -70,7 +70,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-import constants as C
+import Game.constants as C
 
 
 # =============================================================================
