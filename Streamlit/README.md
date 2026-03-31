@@ -29,7 +29,8 @@ streamlit run Streamlit/app.py
 - Push this repo to GitHub.
 - In Streamlit Community Cloud, create new app.
 - Set main file path to: Streamlit/app.py
-- Use Python 3.12.
-- Add any missing dependencies if prompted.
+- Set Python version to: 3.11 (required for reliable pygame/torch wheels).
+- Use requirements file: Streamlit/requirements.txt
+- If deployment was previously attempted on Python 3.14, click Reboot app after updating.
 
 After deployment you get a public app URL.
