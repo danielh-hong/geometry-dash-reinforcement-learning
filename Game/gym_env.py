@@ -319,20 +319,18 @@ class GeometryDashGymEnv(gym.Env):
         on_top_of_stairs = self._is_on_top_of_stairs_no_further_up()
         # on_top_of_stairs_and_spike logic removed
         if on_top_of_stairs:
-            print(f"[DEBUG][step] Player is on top of stairs (no further up). jump_executed={jump_executed}, jump_pressed={jump_pressed}, on_top_of_stairs_and_spike={on_top_of_stairs_and_spike}")
+            print(f"[DEBUG][step] Player is on top of stairs (no further up). jump_executed={jump_executed}, jump_pressed={jump_pressed}")
         if jump_executed:
             print(f"[DEBUG][step] Jump executed. Applying jump penalty: {self.config.jump_action_penalty}")
             accumulated_reward -= float(self.config.jump_action_penalty)
             # dangerous jump penalty logic removed
-            elif (
+            if (
                 nearest_obstacle_distance is None
                 or nearest_obstacle_distance > float(self.config.jump_danger_distance_px)
             ):
                 print(f"[DEBUG][step] Unnecessary jump penalty applied: {self.config.unnecessary_jump_penalty}")
                 accumulated_reward -= float(self.config.unnecessary_jump_penalty)
         else:
-            if on_top_of_stairs_and_spike:
-                print(f"[DEBUG][step] On top of stairs and spike ahead. Action: NO JUMP. No penalty applied.")
             if jump_pressed:
                 print(f"[DEBUG][step] Air jump penalty applied: {self.config.air_jump_penalty}")
                 accumulated_reward -= float(self.config.air_jump_penalty)
