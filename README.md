@@ -35,6 +35,19 @@ python game.py
 
 Controls: `SPACE` / `UP` = jump &nbsp;|&nbsp; `R` = restart &nbsp;|&nbsp; `Q` = quit
 
+## Computer Vision
+**1.Testing CV**
+python yolo.py
+> Starts real time yolo inference livestreams from computer
+
+**2. Trained RL agent playing GD**
+python integrate_yolo_rl.py
+> Uses real time inference and sends jump/space action to computer
+
+**3. Training**
+python train_yolo.py
+> Requires data folder in standard yolo format.
+
 ---
 
 ## PPO + Gymnasium (Recommended Training Path)

@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 7
+names: ['Block', 'Block2', 'Block3', 'Player', 'Spike', 'Spike2', 'Spike3']
+
+roboflow:
+  workspace: qixins-workspace
+  project: qixins-workspace
+  version: dataset
+  license: Private
+  url: https://app.roboflow.com/qixins-workspace/qixins-workspace/dataset
