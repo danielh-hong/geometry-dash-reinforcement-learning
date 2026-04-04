@@ -552,7 +552,7 @@ POOL_2 = [   # Phase 2: More variety, still forgiving
     (chunk_spike_gate,             10),
     (chunk_alternating_spikes,      4),
     (chunk_spike_then_platform,     4),
-    (chunk_spike_on_block,          4),
+    (chunk_spike_gate,              4),
 ]
 
 POOL_3 = [   # Phase 3: Verticality + first harder spike motifs
@@ -567,10 +567,9 @@ POOL_3 = [   # Phase 3: Verticality + first harder spike motifs
 POOL_4 = [   # Phase 4: Combo-heavy with occasional dense spikes
     (chunk_double_spike,           14),
     (chunk_triple_spike,           10),
-    (chunk_spike_on_block,         14),
     (chunk_spike_gate,             18),
     (chunk_alternating_spikes,     16),
-    (chunk_spike_then_platform,    10),
+    (chunk_spike_then_platform,    24),
     (chunk_platform_with_spike_ends, 10),
     (chunk_spike_cluster,           8),
 ]
@@ -579,10 +578,9 @@ POOL_5 = [   # Phase 5: High density with broad pattern coverage
     (chunk_triple_spike,           24),
     (chunk_spike_cluster,          20),
     (chunk_triple_then_single,     16),
-    (chunk_spike_on_block,         12),
-    (chunk_spike_gate,             12),
+    (chunk_spike_gate,             18),
     (chunk_alternating_spikes,     10),
-    (chunk_platform_with_spike_ends, 6),
+    (chunk_platform_with_spike_ends, 12),
 ]
 
 POOLS = {1: POOL_1, 2: POOL_2, 3: POOL_3, 4: POOL_4, 5: POOL_5, 6: POOL_5}  # Cap at Phase 5
@@ -793,6 +791,64 @@ class LevelGenerator:
             # Small gap between staircases (0.3s–0.5s)
             gap = self._rng.randint(int(0.3 * C.GAME_SPEED), int(0.5 * C.GAME_SPEED))
             x += gap
+
+        obstacles.sort(key=lambda o: o["x"])
+        return obstacles
+
+    def generate_rhythm_only(self, length: int = 9000) -> list[dict]:
+        """
+        Special training mode: rhythm-focused ground patterns only.
+
+        Uses alternating spike timing and gate-like motifs without staircase
+        verticality so the agent can focus on jump cadence.
+        """
+        obstacles: list[dict] = []
+        rhythm_pool = [
+            chunk_spike_gate,
+            chunk_alternating_spikes,
+            chunk_spike_then_platform,
+            chunk_spike_cluster,
+            chunk_flat_ground,
+        ]
+
+        x = float(C.SCREEN_W + C.GAME_SPEED * 1.5)
+
+        while x < length + C.SCREEN_W:
+            chunk_fn = self._rng.choice(rhythm_pool)
+            chunk_objs, width = chunk_fn(x)
+            obstacles.extend(chunk_objs)
+            x += width
+            x += self._rng.randint(int(0.5 * C.GAME_SPEED), int(0.9 * C.GAME_SPEED))
+
+        obstacles.sort(key=lambda o: o["x"])
+        return obstacles
+
+    def generate_spike_only(self, length: int = 9000) -> list[dict]:
+        """
+        Special training mode: spike motifs only (no blocks/stairs).
+
+        Useful for pure jump-timing evaluation and apples-to-apples policy
+        comparisons on spike handling.
+        """
+        obstacles: list[dict] = []
+        spike_pool = [
+            chunk_single_spike,
+            chunk_double_spike,
+            chunk_triple_spike,
+            chunk_spike_gate,
+            chunk_alternating_spikes,
+            chunk_spike_cluster,
+            chunk_triple_then_single,
+        ]
+
+        x = float(C.SCREEN_W + C.GAME_SPEED * 1.5)
+
+        while x < length + C.SCREEN_W:
+            chunk_fn = self._weighted_choice([(fn, 1) for fn in spike_pool])
+            chunk_objs, width = chunk_fn(x)
+            obstacles.extend(chunk_objs)
+            x += width
+            x += self._rng.randint(int(0.45 * C.GAME_SPEED), int(0.8 * C.GAME_SPEED))
 
         obstacles.sort(key=lambda o: o["x"])
         return obstacles

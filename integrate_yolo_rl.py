@@ -4,6 +4,8 @@ integrate_yolo_rl.py
 Drop‑in replacement that:
 - Captures ROI using YOLOObservationPipeline (which now outputs the exact
     normalized vector schema used by Game.get_normalized_observation)
+- Captures ROI using YOLOObservationPipeline (which now outputs the exact
+    normalized vector schema used by Game.get_normalized_observation)
 - Feeds it to a Stable‑Baselines3 PPO checkpoint
 """
 
@@ -112,9 +114,15 @@ def main() -> None:
         obs = np.asarray(obs, dtype=np.float32).reshape(-1)
 
         if obs.shape[0] == 0:
+        if obs.shape[0] == 0:
             print("Warning: empty observation from YOLO pipeline")
             continue
 
+        if obs.shape[0] != 28:
+            print(f"Warning: observation has length {obs.shape[0]}, expected 28")
+
+        # Warn if player not detected (first three values are zeros)
+        if obs[0] == 0.0 and obs[1] == 0.0 and obs[2] == 0.0:
         if obs.shape[0] != 28:
             print(f"Warning: observation has length {obs.shape[0]}, expected 28")
 
@@ -124,8 +132,11 @@ def main() -> None:
 
         # Optional debug print.
         print(f"Frame {frame_idx}: obs (first 10) = {obs[:10]}")
+        # Optional debug print.
+        print(f"Frame {frame_idx}: obs (first 10) = {obs[:10]}")
 
         # Get PPO action and probabilities
+        action, probs = predict_action_and_probs(model, obs)
         action, probs = predict_action_and_probs(model, obs)
 
         print(f"Frame {frame_idx}: PPO action = {action} | p(wait)={probs[0]:.3f} p(jump)={probs[1]:.3f}")

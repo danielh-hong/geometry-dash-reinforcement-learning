@@ -3,6 +3,8 @@ yolo.py
 
 Outputs the same normalized 28-feature vector schema used by
 Game.get_normalized_observation() during PPO training.
+Outputs the same normalized 28-feature vector schema used by
+Game.get_normalized_observation() during PPO training.
 """
 
 from __future__ import annotations
@@ -16,6 +18,8 @@ from time import perf_counter
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ultralytics import YOLO
+
+from Game import constants as C
 
 from Game import constants as C
 
@@ -37,7 +41,16 @@ BLOCK_SIZE = float(C.BLOCK_SIZE)
 PLAYER_SIZE = float(C.PLAYER_SIZE)
 GAME_SPEED = float(C.GAME_SPEED)
 MAX_FALL_SPEED = float(C.MAX_FALL_SPEED)
+GROUND_Y = float(C.GROUND_Y)
+BLOCK_SIZE = float(C.BLOCK_SIZE)
+PLAYER_SIZE = float(C.PLAYER_SIZE)
+GAME_SPEED = float(C.GAME_SPEED)
+MAX_FALL_SPEED = float(C.MAX_FALL_SPEED)
 
+# PPO observation constants from Game.get_normalized_observation
+MAX_OBSTACLES = 3
+VISION_LIMIT_PX = 784.0
+TIME_NORM_FACTOR = 6.0
 # PPO observation constants from Game.get_normalized_observation
 MAX_OBSTACLES = 3
 VISION_LIMIT_PX = 784.0
@@ -97,6 +110,11 @@ def canonical_kind(name: str) -> str:
         return "spike"
     return "block"
 
+def canonical_kind(name: str) -> str:
+    if name in SPIKE_NAMES:
+        return "spike"
+    return "block"
+
 def best_detection(detections: Sequence[Detection], name: str) -> Optional[Detection]:
     best = None
     for d in detections:
@@ -142,6 +160,7 @@ def merge_adjacent_obstacles(obstacles: List[Dict[str, Any]]) -> List[Dict[str, 
 # -----------------------------------------------------------------------------
 class YOLOObservationPipeline:
     """Stateful pipeline that returns PPO-ready normalized observations."""
+    """Stateful pipeline that returns PPO-ready normalized observations."""
     def __init__(
         self,
         model_path: str,
@@ -166,6 +185,7 @@ class YOLOObservationPipeline:
         self.tracked_obstacles = []
 
     def step(self, roi: np.ndarray, now_t: Optional[float] = None) -> List[float]:
+        """Return the normalized 28-float PPO observation for one ROI frame."""
         """Return the normalized 28-float PPO observation for one ROI frame."""
         _, _, obs = self.step_with_debug(roi, now_t=now_t)
         return obs
@@ -297,6 +317,7 @@ class YOLOObservationPipeline:
         verified_obstacles.sort(key=lambda t: t.x1)
 
         # Build observation vector matching Game.get_normalized_observation.
+        # Build observation vector matching Game.get_normalized_observation.
         obs = self._build_observation_vector(players, verified_obstacles, now_t)
         self.state.prev_time = now_t
 
@@ -343,6 +364,30 @@ class YOLOObservationPipeline:
 
         return 0.0
 
+    def _infer_on_ground(
+        self,
+        player: Detection,
+        verified_obstacles: Sequence[TrackedObstacle],
+    ) -> float:
+        player_left = float(player.x1)
+        player_right = float(player.x2)
+        player_bottom = float(player.y2)
+
+        # Ground support.
+        if abs(player_bottom - GROUND_Y) <= 6.0:
+            return 1.0
+
+        # Block-top support.
+        for o in verified_obstacles:
+            if o.name not in BLOCK_NAMES:
+                continue
+            horizontal_overlap = (player_right > o.x1) and (player_left < o.x2)
+            standing_on_top = abs(player_bottom - o.y1) <= 8.0
+            if horizontal_overlap and standing_on_top:
+                return 1.0
+
+        return 0.0
+
     def _build_observation_vector(
         self,
         players: Sequence[Detection],
@@ -354,10 +399,16 @@ class YOLOObservationPipeline:
           [player_y_norm, player_vy_norm, on_ground,
            obstacle_1(8), obstacle_2(8), obstacle_3(8),
            is_jump_possible_now]
+        Build the normalized observation vector of length 28 used in PPO training:
+          [player_y_norm, player_vy_norm, on_ground,
+           obstacle_1(8), obstacle_2(8), obstacle_3(8),
+           is_jump_possible_now]
         """
         # ----- Player state -----
         if players:
             player = max(players, key=lambda p: p.conf)
+            player_y = float(player.y1)
+            player_x = float(player.x1)
             player_y = float(player.y1)
             player_x = float(player.x1)
 
@@ -366,12 +417,16 @@ class YOLOObservationPipeline:
                 dy = player_y - self.state.prev_player_y
                 raw_vy = dy / dt  # px/s
                 vy_norm = clamp(raw_vy / MAX_FALL_SPEED, -1.0, 1.0)
+                raw_vy = dy / dt  # px/s
+                vy_norm = clamp(raw_vy / MAX_FALL_SPEED, -1.0, 1.0)
             else:
                 vy_norm = 0.0
 
             on_ground = self._infer_on_ground(player, verified_obstacles)
+            on_ground = self._infer_on_ground(player, verified_obstacles)
         else:
             player_y = 0.0
+            player_x = 0.0
             player_x = 0.0
             vy_norm = 0.0
             on_ground = 0.0
@@ -381,7 +436,13 @@ class YOLOObservationPipeline:
             float(vy_norm),
             float(on_ground),
         ]
+        obs = [
+            clamp(player_y / GROUND_Y, 0.0, 1.0),
+            float(vy_norm),
+            float(on_ground),
+        ]
 
+        # ----- Obstacles (canonicalized + merged exactly like game.py) -----
         # ----- Obstacles (canonicalized + merged exactly like game.py) -----
         obstacle_dicts = []
         for o in verified_obstacles:
@@ -394,8 +455,35 @@ class YOLOObservationPipeline:
                 "w": float(o.x2 - o.x1),
                 "h": float(o.y2 - o.y1),
             })
+            if o.x2 < player_x:
+                continue
+            obstacle_dicts.append({
+                "kind": canonical_kind(o.name),
+                "x": float(o.x1),
+                "y": float(o.y1),
+                "w": float(o.x2 - o.x1),
+                "h": float(o.y2 - o.y1),
+            })
 
         obstacle_dicts.sort(key=lambda o: o["x"])
+
+        merged: List[Dict[str, float | str]] = []
+        for o in obstacle_dicts:
+            if not merged:
+                merged.append(o.copy())
+                continue
+
+            last = merged[-1]
+            if (
+                o["kind"] == last["kind"]
+                and float(o["x"]) <= float(last["x"]) + float(last["w"]) + 1.0
+            ):
+                new_right = max(float(last["x"]) + float(last["w"]), float(o["x"]) + float(o["w"]))
+                last["w"] = new_right - float(last["x"])
+                last["y"] = min(float(last["y"]), float(o["y"]))
+                last["h"] = max(float(last["h"]), float(o["h"]))
+            else:
+                merged.append(o.copy())
 
         merged: List[Dict[str, float | str]] = []
         for o in obstacle_dicts:
@@ -442,7 +530,37 @@ class YOLOObservationPipeline:
                     clamp(gap_top / GROUND_Y, 0.0, 1.0),
                     clamp(gap_bot / GROUND_Y, 0.0, 1.0),
                 ])
+            if i < len(merged):
+                o = merged[i]
+                rel_x = float(o["x"]) - player_x
+                if rel_x > VISION_LIMIT_PX:
+                    obs.extend([0.0] * 8)
+                    continue
+
+                rel_y = float(o["y"]) - player_y
+                time_to_reach = rel_x / GAME_SPEED if GAME_SPEED > 0.0 else 0.0
+                gap_top = max(0.0, float(o["y"]) - (player_y + PLAYER_SIZE))
+                gap_bot = (
+                    max(0.0, (player_y - PLAYER_SIZE) - (float(o["y"]) + float(o["h"])))
+                    if o["kind"] == "block"
+                    else 0.0
+                )
+
+                obs.extend([
+                    0.0 if o["kind"] == "spike" else 1.0,
+                    clamp(rel_x / VISION_LIMIT_PX, 0.0, 1.0),
+                    clamp(rel_y / GROUND_Y, -1.0, 1.0),
+                    clamp((float(o["w"]) / BLOCK_SIZE) / 5.0, 0.0, 1.0),
+                    clamp((float(o["h"]) / BLOCK_SIZE) / 5.0, 0.0, 1.0),
+                    clamp(time_to_reach / TIME_NORM_FACTOR, 0.0, 1.0),
+                    clamp(gap_top / GROUND_Y, 0.0, 1.0),
+                    clamp(gap_bot / GROUND_Y, 0.0, 1.0),
+                ])
             else:
+                obs.extend([0.0] * 8)
+
+        # is_jump_possible_now in game.py is exactly obs["on_ground"].
+        obs.append(float(on_ground))
                 obs.extend([0.0] * 8)
 
         # is_jump_possible_now in game.py is exactly obs["on_ground"].
