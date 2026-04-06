@@ -91,60 +91,12 @@ class GdEnvConfig:
     air_jump_penalty: float = 0.0
     unnecessary_jump_penalty: float = 0.0
     jump_danger_distance_px: float = 50.0
-    # dangerous_jump_penalty removed
 
     # Rendering is generally False for training speed, True for debugging.
     render: bool = False
 
 
 class GeometryDashGymEnv(gym.Env):
-    def _is_on_top_of_stairs_no_further_up(self) -> bool:
-        """Detect if player is on the highest stair step (no further steps above)."""
-        player = self._game.player
-        player_x = player.x
-        player_w = getattr(player, 'hitbox', None).width if hasattr(player, 'hitbox') else 112  # Default to 1 block
-        player_y = player.y
-        player_bottom = player_y + player_w  # y increases downward
-        print(f"[DEBUG][stairs] Checking: player_x={player_x}, player_y={player_y}, player_w={player_w}, player_bottom={player_bottom}")
-
-        # Find all blocks that horizontally overlap with the player
-        blocks_under = [
-            obs for obs in self._game.obstacles
-            if getattr(obs, 'kind', None) == 'block'
-            and (player_x + player_w > obs.x)
-            and (player_x < obs.x + obs.w)
-        ]
-        if not blocks_under:
-            print(f"[DEBUG][stairs] No blocks under player.")
-            return False
-
-        # Find the block directly under the player's feet (closest to player_bottom, but not above it)
-        blocks_below = [b for b in blocks_under if b._y >= player_bottom - 8]
-        if not blocks_below:
-            print(f"[DEBUG][stairs] No blocks directly under player's feet.")
-            return False
-        top_block = min(blocks_below, key=lambda b: b._y)
-        y_diff = abs(player_bottom - top_block._y)
-        print(f"[DEBUG][stairs] Top block y={top_block._y}, y_diff={y_diff}")
-        if y_diff > 8:
-            print(f"[DEBUG][stairs] Player not close enough to top block (y_diff={y_diff}).")
-            return False
-
-        # Check if there is any block above this one (same x overlap, smaller y)
-        blocks_above = [
-            obs for obs in self._game.obstacles
-            if getattr(obs, 'kind', None) == 'block'
-            and (player_x + player_w > obs.x)
-            and (player_x < obs.x + obs.w)
-            and obs._y < top_block._y - 2
-        ]
-        if blocks_above:
-            print(f"[DEBUG][stairs] There are further stairs above (blocks_above count: {len(blocks_above)}).")
-            return False
-        print(f"[DEBUG][stairs] Player is on top of stairs with no further up.")
-        return True
-
-    # _is_on_top_of_stairs_and_spike_ahead removed
     """
     Gymnasium-compatible environment for Geometry Dash.
 
@@ -313,17 +265,16 @@ class GeometryDashGymEnv(gym.Env):
                 terminated = True
                 break
 
+        # Print the input vector (observation) after each frame
+        obs_vec = self._current_observation()
+        print(f"[DEBUG][input_vector][frame] {obs_vec}")
+
         # Optional reward shaping: survival bonus + anti-spam penalties.
         accumulated_reward += float(self.config.alive_reward)
         # Penalize each actual jump event (on-ground jump), even if action=1 is held.
-        on_top_of_stairs = self._is_on_top_of_stairs_no_further_up()
-        # on_top_of_stairs_and_spike logic removed
-        if on_top_of_stairs:
-            print(f"[DEBUG][step] Player is on top of stairs (no further up). jump_executed={jump_executed}, jump_pressed={jump_pressed}")
         if jump_executed:
             print(f"[DEBUG][step] Jump executed. Applying jump penalty: {self.config.jump_action_penalty}")
             accumulated_reward -= float(self.config.jump_action_penalty)
-            # dangerous jump penalty logic removed
             if (
                 nearest_obstacle_distance is None
                 or nearest_obstacle_distance > float(self.config.jump_danger_distance_px)

@@ -48,6 +48,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42, help="Seed for reproducible level")
     parser.add_argument("--length", type=int, default=9000, help="Level length in pixels")
     parser.add_argument("--staircase-only", action="store_true", help="Use staircase-only generated test level")
+    parser.add_argument("--triple-only", action="store_true", help="Use triple-spike-only generated test level")
+    parser.add_argument("--progressive", action="store_true", help="Enable progressive curriculum (ramps up difficulty)")
     parser.add_argument(
         "--action-repeat",
         type=int,
@@ -96,12 +98,15 @@ def main() -> None:
     level_gen = LevelGenerator(
         difficulty=args.difficulty,
         seed=args.seed,
-        progressive=False,
+        progressive=args.progressive,
     )
-    if args.staircase_only:
+    if args.triple_only:
+        level_obstacles = level_gen.generate_triple_only(length=args.length)
+    elif args.staircase_only:
         level_obstacles = level_gen.generate_staircase_only(length=args.length)
     else:
-        level_obstacles = level_gen.generate(length=args.length)
+        # Use custom-only level as the default
+        level_obstacles = level_gen.generate_custom_only(length=args.length)
 
     game = Game(render=True, seed=args.seed, debug=False, agent_policy=None)
     game.load_level(level_obstacles)
@@ -115,7 +120,6 @@ def main() -> None:
     decision_index = 0
     current_action = 0
     current_probs = np.asarray([0.5, 0.5], dtype=np.float32)
-    total_reward = 0.0
 
     print("=" * 70)
     print("  GEOMETRY DASH RL — PPO Watch Mode")
@@ -157,6 +161,9 @@ def main() -> None:
         # that action between decisions.
         if frame_index % max(1, args.action_repeat) == 0:
             obs_norm = np.asarray(game.get_normalized_observation(), dtype=np.float32)
+            # Print input vector with decimals, suppress scientific notation, compact
+            np.set_printoptions(precision=4, suppress=True, floatmode='fixed', linewidth=200)
+            print(f"[DEBUG][input_vector][decision {decision_index}] {obs_norm}")
             obs_norm = _adapt_obs_for_model(model, obs_norm)
             current_action, current_probs = _get_policy_action_and_probs(model, obs_norm)
             decision_index += 1

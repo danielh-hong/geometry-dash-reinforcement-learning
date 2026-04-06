@@ -365,14 +365,14 @@ def chunk_spike_on_block(x: float) -> tuple[list[dict], float]:
     objs = []
     for col in range(3):
         objs.extend(_block(x + col * B, stack=1))
-    # Spike sits on top of middle block
-    objs.append({
-        "type": "spike",
-        "x":    float(x + B),          # centred on the 3-wide platform
-        "y":    float(C.GROUND_Y - C.BLOCK_H - C.SPIKE_H),
-        "w":    float(C.SPIKE_W),
-        "h":    float(C.SPIKE_H),
-    })
+    # Spike sits on top of middle block (DISABLED: not wanted)
+    # objs.append({
+    #     "type": "spike",
+    #     "x":    float(x + B),          # centred on the 3-wide platform
+    #     "y":    float(C.GROUND_Y - C.BLOCK_H - C.SPIKE_H),
+    #     "w":    float(C.SPIKE_W),
+    #     "h":    float(C.SPIKE_H),
+    # })
     return objs, float(3 * B)
 
 def chunk_platform_with_spike_ends(x: float) -> tuple[list[dict], float]:
@@ -601,19 +601,44 @@ GAPS = {
 # =============================================================================
 
 class LevelGenerator:
-    """
-    Generates a procedural Geometry Dash-style level as a list of obstacle dicts.
+    def generate_custom_only(self, length: int = 9000) -> list[dict]:
+        """
+        Special mode: only single, double, triple spikes, block walls, and staircases.
 
-    Parameters
-    ----------
-    difficulty : int  1–5
-        1 = Stereo Madness (easy), 5 = Cycles/extreme.
-    seed : int | None
-        Fixed seed → same level every call. None = random.
-    progressive : bool
-        Ramp difficulty from 1 → `difficulty` over the first 70% of the level.
-        Good for curriculum RL training.
-    """
+        Parameters
+        ----------
+        length : int
+            Level length in pixels (~9000px ≈ 30s at normal speed).
+
+        Returns
+        -------
+        list[dict] — obstacle dicts (custom obstacles only)
+        """
+        obstacles: list[dict] = []
+        x = float(C.SCREEN_W + C.GAME_SPEED * 1.5)
+        chunk_funcs = [
+            chunk_single_spike,
+            chunk_double_spike,
+            chunk_triple_spike,
+            chunk_single_block_wall,
+            chunk_staircase_up,
+        ]
+        gap_min, gap_max = GAPS[self.difficulty]
+        # Reduce gaps by 30% to increase obstacle density
+        gap_min = int(gap_min * 0.7)
+        gap_max = int(gap_max * 0.7)
+        while x < length + C.SCREEN_W:
+            chunk_fn = self._rng.choice(chunk_funcs)
+            if chunk_fn == chunk_staircase_up:
+                steps = 3  # Only 3-step staircases
+                chunk_objs, width = chunk_fn(x, steps)
+            else:
+                chunk_objs, width = chunk_fn(x)
+            obstacles.extend(chunk_objs)
+            x += width
+            x += self._rng.randint(gap_min, gap_max)
+        obstacles.sort(key=lambda o: o["x"])
+        return obstacles
 
     def __init__(
         self,

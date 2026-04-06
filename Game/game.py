@@ -489,7 +489,7 @@ class Game:
         dead = self._check_collision()
 
         reward = C.REWARD_DEATH if dead else C.REWARD_ALIVE
-        
+
         # Apply sparse rewards for successfully clearing obstacles
         if not dead:
             for obs_obj in self.obstacles:
@@ -497,8 +497,27 @@ class Game:
                     self._cleared_obstacles.add(obs_obj)
                     reward += C.REWARD_CLEAR
 
-        done   = dead
         obs = self._obs()
+
+        # Print input vector and obstacle info when player collides (dies)
+        if dead:
+            # Find the obstacle the player collided with (if possible)
+            collided = None
+            for o in self.obstacles:
+                # Always use _y for obstacle y position; skip if not present
+                if not hasattr(o, '_y'):
+                    continue
+                px, py, pw, ph = self.player.x, self.player.y, C.PLAYER_SIZE, C.PLAYER_SIZE
+                ox, oy, ow, oh = o.x, o._y, o.w, o.h
+                if (px < ox + ow and px + pw > ox and py < oy + oh and py + ph > oy):
+                    collided = o
+                    break
+            if collided:
+                print(f"[DEBUG][input_vector][collision] {obs}\n[DEBUG][collided_obstacle] kind={getattr(collided, 'kind', None)}, x={collided.x}, y={getattr(collided, '_y', getattr(collided, 'y', None))}, w={collided.w}, h={collided.h}")
+            else:
+                print(f"[DEBUG][input_vector][collision] {obs}\n[DEBUG][collided_obstacle] None found")
+
+        done   = dead
         self._telemetry_obs = obs
         self._telemetry_reward = reward
         self._telemetry_done = done

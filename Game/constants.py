@@ -137,8 +137,8 @@ SPAWN_X      = SCREEN_W + 60   # px
 #   GAP_MIN = 280 px  →  ~0.93 s reaction time  (medium difficulty)
 #   GAP_MAX = 520 px  →  ~1.73 s reaction time  (easy / breathing room)
 # Tighten GAP_MIN later to increase difficulty.
-GAP_MIN      = 280          # px — tightest gap
-GAP_MAX      = 520          # px — widest gap
+GAP_MIN      = 450          # px — tightest gap (even less dense for human play)
+GAP_MAX      = 850          # px — widest gap (even less dense for human play)
 
 
 # ── Rewards  (for the RL gym wrapper — ignored in human play mode) ────────────

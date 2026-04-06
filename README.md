@@ -6,7 +6,7 @@ A physics-accurate Geometry Dash simulator with a full **PPO training pipeline**
 
 ## 📸 Demo
 
-![Trained PPO agent playing](ScreenRecording2026-03-31at11_14_02AM-ezgif_com-video-to-gif-converter.gif)
+![Trained PPO agent playing](media/demo.gif)
 
 ---
 
