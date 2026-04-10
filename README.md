@@ -210,3 +210,29 @@ training_figures/
 **The metrics CSV** records one row per episode: episode number, reward, episode length in steps, and a 100-episode rolling average. Feed it into `plot_training.py` to visualize progress.
 
 **The reward plot** shows raw per-episode reward (faint) alongside a smoothed rolling average — the rolling average is the clearest signal of whether the agent is actually improving over time.
+
+## Computer Vision
+If Geometry Dash is installed on the computer, real time inference can be performed.
+Start by cd into Cv directory
+```bash
+cd Cv
+```
+
+**1.Testing CV**
+```bash
+python yolo.py
+```
+> Starts real time yolo inference livestream from computer
+> Portion of screen being captured will be displayed as a smaller live window
+
+**2. Trained RL agent playing GD**
+```bash
+python integrate_yolo_rl.py
+```
+> Uses real time inference and sends jump/space action to computer
+
+**3. Training**
+```bash
+python train_yolo.py
+```
+> Requires data folder in standard yolo format.
