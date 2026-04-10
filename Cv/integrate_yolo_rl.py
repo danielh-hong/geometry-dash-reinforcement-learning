@@ -20,16 +20,16 @@ from pathlib import Path
 
 from stable_baselines3 import PPO
 # Import key press helper
-from key_press import press_space
+from Cv.key_press import press_space
 
 # Import YOLOObservationPipeline and screen capture region
-from Cv.yolo import YOLOObservationPipeline, X0, Y0, X1, Y1
+from yolo import YOLOObservationPipeline, X0, Y0, X1, Y1
 
 # Path to YOLO weights (update as needed)
-YOLO_WEIGHTS = "runs/detect/train12/weights/best.pt"
+YOLO_WEIGHTS = "../runs/detect/train12/weights/best.pt"
 
 # Path to PPO model zip file
-RL_WEIGHTS = "Game/logs_custom/checkpoints/ppo_policy_final.zip"
+RL_WEIGHTS = "../Game/logs_custom/checkpoints/ppo_policy_final.zip"
 
 
 def adapt_obs_for_model(model: PPO, obs: np.ndarray) -> np.ndarray:
@@ -114,7 +114,6 @@ def main() -> None:
         obs = np.asarray(obs, dtype=np.float32).reshape(-1)
 
         if obs.shape[0] == 0:
-        if obs.shape[0] == 0:
             print("Warning: empty observation from YOLO pipeline")
             continue
 
@@ -123,8 +122,8 @@ def main() -> None:
 
         # Warn if player not detected (first three values are zeros)
         if obs[0] == 0.0 and obs[1] == 0.0 and obs[2] == 0.0:
-        if obs.shape[0] != 28:
-            print(f"Warning: observation has length {obs.shape[0]}, expected 28")
+            if obs.shape[0] != 28:
+                print(f"Warning: observation has length {obs.shape[0]}, expected 28")
 
         # Warn if player not detected (first three values are zeros)
         if obs[0] == 0.0 and obs[1] == 0.0 and obs[2] == 0.0:

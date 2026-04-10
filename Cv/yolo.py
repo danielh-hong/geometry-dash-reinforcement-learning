@@ -561,7 +561,7 @@ class YOLOObservationPipeline:
 
         # is_jump_possible_now in game.py is exactly obs["on_ground"].
         obs.append(float(on_ground))
-                obs.extend([0.0] * 8)
+        obs.extend([0.0] * 8)
 
         # is_jump_possible_now in game.py is exactly obs["on_ground"].
         obs.append(float(on_ground))

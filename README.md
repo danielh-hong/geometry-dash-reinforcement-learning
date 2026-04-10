@@ -227,7 +227,7 @@ python yolo.py
 
 **2. Trained RL agent playing GD**
 ```bash
-python ../integrate_yolo_rl.py
+python integrate_yolo_rl.py
 ```
 > Uses real time inference and sends jump/space action to computer
 
